@@ -38,30 +38,39 @@ git clone https://github.com/adamo1139/syntezujemy_polska_mowe.git
 cd syntezujemy_polska_mowe
 ```
 
-### 2.0 Pamięć podręczna uv poza dyskiem głównym (rig)
+### 2.0 Pamięć podręczna uv i model poza dyskiem głównym (rig)
 
-Na rigu dysk główny nie ma miejsca na pamięć podręczną uv (same koła torch i flash-attn to kilka GB),
-więc dla tego projektu idzie ona na `/media/nvme_2tb/maked/audio`. Plik `uv.toml` w katalogu projektu
-działa tylko dla poleceń uv uruchamianych z tego katalogu i nie jest w repo (ścieżka jest specyficzna dla riga):
+Na rigu dysk główny nie ma miejsca ani na pamięć podręczną uv (same koła torch i flash-attn to kilka GB),
+ani na model (ok. 5 GB). Dla tego projektu oba trafiają na `/media/nvme_2tb/maked/audio`:
+
+| co | gdzie | jak ustawione |
+|---|---|---|
+| pamięć podręczna uv | `/media/nvme_2tb/maked/audio/uv-cache` | `uv.toml` w katalogu projektu |
+| model i reszta pamięci HF | `/media/nvme_2tb/maked/audio/hf` | `HF_HOME` dopisane do `.venv/bin/activate` |
+
+Oba ustawienia są lokalne dla riga i nie ma ich w repo.
 
 ```bash
-mkdir -p /media/nvme_2tb/maked/audio/uv-cache
+mkdir -p /media/nvme_2tb/maked/audio/uv-cache /media/nvme_2tb/maked/audio/hf
 echo 'cache-dir = "/media/nvme_2tb/maked/audio/uv-cache"' > uv.toml
 uv cache dir    # ma wypisać /media/nvme_2tb/maked/audio/uv-cache
-```
 
-Polecenia `uv` uruchamiać z katalogu projektu — z innego miejsca uv wróci do `~/.cache/uv`.
-
-Poza pamięcią podręczną na dysk, na którym leży projekt, trafia jeszcze samo środowisko `.venv` (kilka GB;
-przy pamięci podręcznej na innym dysku uv kopiuje pliki zamiast je linkować i wypisuje o tym ostrzeżenie —
-to nie błąd) oraz model w `~/.cache/huggingface` (ok. 5 GB). Jeśli i na to brakuje miejsca: sklonować
-projekt na `/media/nvme_2tb/maked/audio`, a przed krokiem 3 ustawić
-`export HF_HOME=/media/nvme_2tb/maked/audio/hf` (ta sama zmienna musi być ustawiona przy każdej syntezie).
-
-```bash
 uv venv --python 3.12 .venv
+echo 'export HF_HOME=/media/nvme_2tb/maked/audio/hf' >> .venv/bin/activate
 source .venv/bin/activate
+echo $HF_HOME   # ma wypisać /media/nvme_2tb/maked/audio/hf
 ```
+
+- `uv.toml` działa tylko dla poleceń `uv` uruchamianych z katalogu projektu — z innego miejsca uv wróci
+  do `~/.cache/uv`.
+- `HF_HOME` jest ustawiane przy każdym `source .venv/bin/activate`, więc pobieranie modelu (krok 3) i synteza
+  korzystają z tego samego miejsca. Bez aktywacji środowiska (np. wywołanie `.venv/bin/python` wprost) zmienna
+  nie jest ustawiona i model pobrałby się drugi raz do `~/.cache/huggingface`. Skrypt `generuj.py` wypisuje
+  na starcie, skąd bierze model.
+- Po usunięciu i odtworzeniu `.venv` wiersz z `HF_HOME` trzeba dopisać ponownie.
+- Na dysku, na którym leży projekt, zostaje samo `.venv` (kilka GB). Przy pamięci podręcznej na innym dysku
+  uv kopiuje pliki zamiast je linkować i wypisuje o tym ostrzeżenie — to nie błąd. Jeśli i na `.venv` brakuje
+  miejsca, sklonować projekt na `/media/nvme_2tb/maked/audio`.
 
 ### 2.1 Pakiety (bez kompilacji)
 
@@ -110,7 +119,9 @@ uv pip freeze > wymagania-zamrozone.txt
 
 ```bash
 uv pip install -U "huggingface_hub[cli]"
+echo $HF_HOME                 # na rigu: /media/nvme_2tb/maked/audio/hf (krok 2.0)
 hf download openbmb/VoxCPM2
+du -sh "${HF_HOME:-$HOME/.cache/huggingface}/hub/models--openbmb--VoxCPM2"   # ok. 5 GB
 ```
 
 Skrypt przyjmuje `--model openbmb/VoxCPM2` (domyślnie; bierze z pamięci podręcznej HF) albo ścieżkę do katalogu.

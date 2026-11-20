@@ -161,6 +161,9 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
     manifest = wyjscie / "manifest.jsonl"
     plik_bledow = wyjscie / "bledy.jsonl"
 
+    if not Path(args.model).expanduser().is_dir():
+        hf_home = os.environ.get("HF_HOME")
+        print(f"Model z pamięci HF: {hf_home if hf_home else '~/.cache/huggingface (HF_HOME nieustawione)'}")
     print(f"Ładowanie modelu {args.model} na {liczba_kart} kartach...")
     t_start = time.time()
     serwer = VoxCPM.from_pretrained(
