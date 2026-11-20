@@ -143,13 +143,21 @@ def wczytaj_teksty(args: argparse.Namespace) -> list[dict]:
 def juz_zrobione(manifest: Path) -> set[str]:
     if not manifest.exists():
         return set()
+    # Po twardym przerwaniu (kill -9, zanik zasilania) ostatni wiersz może być urwany: obcinamy go,
+    # żeby następny wpis nie skleił się z nim w jeden zepsuty wiersz.
+    dane = manifest.read_bytes()
+    if dane and not dane.endswith(b"\n"):
+        ostatni_koniec = dane.rfind(b"\n") + 1
+        print(f"Manifest kończył się urwanym wierszem ({len(dane) - ostatni_koniec} bajtów) — obcięty.")
+        with manifest.open("r+b") as plik:
+            plik.truncate(ostatni_koniec)
     gotowe = set()
     with manifest.open(encoding="utf-8") as plik:
-        for wiersz in plik:
+        for nr, wiersz in enumerate(plik, 1):
             try:
                 gotowe.add(json.loads(wiersz)["id"])
             except (json.JSONDecodeError, KeyError):
-                continue  # urwany ostatni wiersz po przerwaniu
+                sys.exit(f"{manifest}:{nr}: zepsuty wiersz w środku pliku — popraw albo usuń go ręcznie.")
     return gotowe
 
 
@@ -207,11 +215,14 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
 
         semafor = asyncio.Semaphore(args.rownolegle * liczba_kart)
         blokada_zapisu = asyncio.Lock()
-        stan = {"sekundy": 0.0, "gotowe": 0, "bledy": 0}
+        stan = {"sekundy": 0.0, "gotowe": 0, "bledy": 0, "bledy_z_rzedu": 0}
+        przerwij = asyncio.Event()
         t_synteza = time.time()
 
         async def jeden(pozycja: dict) -> None:
             async with semafor:
+                if przerwij.is_set():
+                    return  # nie zapisujemy jako błąd: tekst zostanie zrobiony po wznowieniu
                 t0 = time.time()
                 try:
                     kawalki = []
@@ -229,6 +240,15 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
                     await asyncio.to_thread(sf.write, sciezka, fala, czestotliwosc, format="FLAC", subtype="PCM_16")
                 except Exception as blad:  # jeden zły tekst nie zatrzymuje całości
                     stan["bledy"] += 1
+                    stan["bledy_z_rzedu"] += 1
+                    if stan["bledy_z_rzedu"] >= args.max_bledow_z_rzedu and not przerwij.is_set():
+                        przerwij.set()
+                        print(
+                            f"\nPRZERYWAM: {stan['bledy_z_rzedu']} błędów z rzędu — najpewniej padł proces którejś karty "
+                            f"(ostatni błąd: {blad!r}). Sprawdź nvidia-smi, popraw --rownolegle/--pamiec albo pomiń kartę "
+                            "i uruchom to samo polecenie jeszcze raz.",
+                            flush=True,
+                        )
                     async with blokada_zapisu:
                         with plik_bledow.open("a", encoding="utf-8") as plik:
                             plik.write(json.dumps({"id": pozycja["id"], "blad": repr(blad)}, ensure_ascii=False) + "\n")
@@ -249,6 +269,7 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
                         plik.write(json.dumps(wpis, ensure_ascii=False) + "\n")
                 stan["sekundy"] += sekundy
                 stan["gotowe"] += 1
+                stan["bledy_z_rzedu"] = 0
                 if stan["gotowe"] % args.co_ile == 0:
                     minelo = time.time() - t_synteza
                     print(
@@ -266,6 +287,8 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
             f"({stan['sekundy'] / max(minelo, 1e-9) / liczba_kart:.0f}x na kartę). Błędy: {stan['bledy']}."
         )
         print(f"Manifest: {manifest}")
+        if przerwij.is_set():
+            print(f"Przebieg przerwany; zostało {len(pozycje) - stan['gotowe'] - stan['bledy']} tekstów. Wznowienie: to samo polecenie.")
         if stan["bledy"]:
             print(f"Błędy:    {plik_bledow}")
     finally:
@@ -305,13 +328,14 @@ def main() -> None:
     g.add_argument("--kroki", type=int, default=10, help="kroki dyfuzji")
     g.add_argument("--temperatura", type=float, default=1.0)
     g.add_argument("--ziarno", type=int, help="stałe ziarno (to samo dla każdego tekstu)")
-    g.add_argument("--max-krokow", type=int, default=2000, help="limit kroków generacji na klip")
+    g.add_argument("--max-krokow", type=int, default=700, help="limit kroków generacji na klip; 1 krok = 0,16 s audio, 700 = 112 s")
 
     g = p.add_argument_group("wydajność")
     g.add_argument("--rownolegle", type=int, default=16, help="równoległe żądania NA KARTĘ")
     g.add_argument("--pamiec", type=float, default=0.8, help="ułamek VRAM dla silnika (gpu_memory_utilization)")
     g.add_argument("--max-tokenow", type=int, default=16384, help="max_num_batched_tokens")
     g.add_argument("--co-ile", type=int, default=100, help="co ile klipów wypisać postęp")
+    g.add_argument("--max-bledow-z-rzedu", type=int, default=50, help="po tylu błędach pod rząd przerwij przebieg")
     args = p.parse_args()
 
     karty = wykryj_karty()

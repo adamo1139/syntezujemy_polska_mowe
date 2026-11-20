@@ -134,9 +134,10 @@ def main() -> None:
         return
     udzial = lambda warunek: 100 * sum(1 for f in wybrane if warunek(f)) / ile
     print(f"  pytania użytkownika: {udzial(lambda f: f['rola'] == 'user'):.0f}%, kończące się „?”: {udzial(lambda f: f['pytanie']):.0f}%")
-    sek = [f["znaki"] / ZNAKI_NA_SEKUNDE for f in wybrane]
-    przedzialy = [(0, 2), (2, 5), (5, 10), (10, 15.01)]
-    print("  długość: " + ", ".join(f"{a:g}–{b:.0f} s: {100 * sum(a <= s < b for s in sek) / ile:.0f}%" for a, b in przedzialy))
+    przedzialy = [("do 5 s", 0, 5), ("5–15 s", 5, 15), ("15–30 s", 15, 30), ("ponad 30 s", 30, 1e9)]
+    w = [[f["znaki"] for f in wybrane if a <= f["znaki"] / ZNAKI_NA_SEKUNDE < b] for _, a, b in przedzialy]
+    print("  rozkład klipów: " + ", ".join(f"{n}: {100 * len(x) / ile:.0f}%" for (n, _, _), x in zip(przedzialy, w)))
+    print("  rozkład czasu:  " + ", ".join(f"{n}: {100 * sum(x) / znaki:.0f}%" for (n, _, _), x in zip(przedzialy, w)))
     na_temat: collections.Counter = collections.Counter()
     for f in wybrane:
         na_temat[str(f["temat"])] += f["znaki"]

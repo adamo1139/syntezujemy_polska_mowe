@@ -26,7 +26,8 @@ Notatki startowe z 2026-11-20. Liczby z pomiarów pochodzą z projektu Pytajnik
 ### Przygotowanie tekstu
 
 1. Odpowiedzi: usunąć markdown (pogrubienia, nagłówki, wypunktowania jako osobne zdania), pociąć na fragmenty
-   1–3 zdań o długości ok. 2–15 s mowy. Pytania użytkownika brać w całości, jeśli mieszczą się w tym zakresie.
+   z całych zdań: mieszanka długości od ok. 1 s do 60 s (decyzja 2026-11-20; wcześniej 1–3 zdań, 2–15 s).
+   Pytania użytkownika brać w całości, jeśli mieszczą się w tym zakresie.
 2. **Bez normalizacji dla nauczyciela.** VoxCPM2 sam poprawnie czyta skróty i liczby (VAT, PIT, CIT, „240 tys.”),
    więc dostaje surowy tekst (po usunięciu markdownu). Rozbieżności typu „SIT”/„PID” w testach Pytajnika to
    najpewniej pomyłki STT, nie TTS.

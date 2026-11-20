@@ -5,7 +5,7 @@ Kroki:
   1. pobranie `sft.jsonl` z HF (do HF_HOME) albo użycie lokalnej kopii (--zrodlo);
   2. odrzucenie rozmów, w których brał udział model `private` (licencja CC-BY-NC);
   3. zostawienie górnych 10% rozmów według `jakosc.ocena` (próg liczony po kroku 2);
-  4. czyszczenie markdownu i cięcie na fragmenty 1–3 zdań o długości ok. 2–15 s mowy;
+  4. czyszczenie markdownu i cięcie na fragmenty z całych zdań: mieszanka długości od ok. 1 s do 60 s;
   5. zapis `teksty/fragmenty.jsonl` (jeden fragment na wiersz) i statystyk.
 
 Tekst zostaje surowy (liczby, skróty) — tak go dostaje VoxCPM2, patrz PLAN.md.
@@ -22,6 +22,7 @@ import argparse
 import collections
 import hashlib
 import json
+import math
 import random
 import re
 import sys
@@ -176,21 +177,22 @@ def ciagi_zdan(tresc: str) -> list[list[str]]:
     return [ciag for ciag in ciagi if ciag]
 
 
-def potnij(ciag: list[str], los: random.Random, min_znakow: int, max_znakow: int) -> list[tuple[str, int]]:
-    """Ciąg zdań -> fragmenty (tekst, liczba zdań): 1–3 zdań, długość w [min_znakow, max_znakow]."""
+def potnij(ciag: list[str], los: random.Random, min_znakow: int, max_znakow: int, cel_od: int) -> list[tuple[str, int]]:
+    """Ciąg zdań -> fragmenty (tekst, liczba zdań) z całych sąsiednich zdań, długość w [min_znakow, max_znakow].
+
+    Każdy fragment losuje sobie długość docelową (logarytmicznie równomiernie między cel_od a max_znakow)
+    i zbiera zdania, aż ją osiągnie. Daje to mieszankę: dużo krótkich klipów i ogon długich, aż do limitu.
+    """
     fragmenty, i = [], 0
     while i < len(ciag):
         if len(ciag[i]) > max_znakow:
             i += 1  # zdanie za długie na jeden klip; nie tniemy w środku zdania
             continue
-        cel = los.choice((1, 1, 2, 2, 3))
+        cel = math.exp(los.uniform(math.log(cel_od), math.log(max_znakow)))
         wziete = [ciag[i]]
         dlugosc = len(ciag[i])
         j = i + 1
-        while j < len(ciag) and len(wziete) < 3:
-            za_krotki = dlugosc < min_znakow
-            if len(wziete) >= cel and not za_krotki:
-                break
+        while j < len(ciag) and dlugosc < max(cel, min_znakow):
             if dlugosc + 1 + len(ciag[j]) > max_znakow:
                 break
             wziete.append(ciag[j])
@@ -218,13 +220,15 @@ def main() -> None:
     p.add_argument("--wyjscie", default=str(KATALOG_PROJEKTU / "teksty" / "fragmenty.jsonl"))
     p.add_argument("--percentyl", type=float, default=90.0, help="próg jakości: zostają rozmowy od tego percentyla w górę")
     p.add_argument("--min-sekund", type=float, default=1.0)
-    p.add_argument("--max-sekund", type=float, default=15.0)
+    p.add_argument("--max-sekund", type=float, default=60.0, help="najdłuższy klip")
+    p.add_argument("--cel-od-sekund", type=float, default=3.0, help="dolna granica losowanej długości docelowej klipu")
     p.add_argument("--ziarno", type=int, default=0)
     args = p.parse_args()
 
     zrodlo = znajdz_zrodlo(args.zrodlo)
     min_znakow = max(1, round(args.min_sekund * ZNAKI_NA_SEKUNDE))
     max_znakow = round(args.max_sekund * ZNAKI_NA_SEKUNDE)
+    cel_od = max(min_znakow, round(args.cel_od_sekund * ZNAKI_NA_SEKUNDE))
     t0 = time.time()
 
     # Przebieg 1: licencja i oceny; zapamiętujemy tylko położenie wiersza w pliku.
@@ -287,7 +291,7 @@ def main() -> None:
                     if caly and not kawalki:
                         licznik["pytania poza zakresem długości"] += 1
                 else:
-                    kawalki = [k for ciag in ciagi for k in potnij(ciag, los, min_znakow, max_znakow)]
+                    kawalki = [k for ciag in ciagi for k in potnij(ciag, los, min_znakow, max_znakow, cel_od)]
                 for nr, (tekst, ile_zdan) in enumerate(kawalki):
                     klucz = klucz_powtorki(tekst)
                     if klucz in widziane:
@@ -337,11 +341,11 @@ def main() -> None:
         dlugosci.sort()
         sek = lambda ulamek: dlugosci[min(len(dlugosci) - 1, int(len(dlugosci) * ulamek))] / ZNAKI_NA_SEKUNDE
         print(f"  długość klipu (szacowana): p10 {sek(0.1):.1f} s, mediana {sek(0.5):.1f} s, p90 {sek(0.9):.1f} s")
-        przedzialy = [(0, 2), (2, 5), (5, 10), (10, 15.01)]
-        opis = ", ".join(
-            f"{a:g}–{b:.0f} s: {100 * sum(a <= d / ZNAKI_NA_SEKUNDE < b for d in dlugosci) / len(dlugosci):.0f}%" for a, b in przedzialy
-        )
-        print(f"  rozkład: {opis}")
+        przedzialy = [(0, 5), (5, 15), (15, 30), (30, 1e9)]
+        nazwy = ["do 5 s", "5–15 s", "15–30 s", "ponad 30 s"]
+        w = [[d for d in dlugosci if a <= d / ZNAKI_NA_SEKUNDE < b] for a, b in przedzialy]
+        print("  rozkład klipów: " + ", ".join(f"{n}: {100 * len(x) / len(dlugosci):.0f}%" for n, x in zip(nazwy, w)))
+        print("  rozkład czasu:  " + ", ".join(f"{n}: {100 * sum(x) / razem_znakow:.0f}%" for n, x in zip(nazwy, w)))
 
 
 if __name__ == "__main__":

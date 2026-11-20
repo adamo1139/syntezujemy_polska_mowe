@@ -203,9 +203,15 @@ python skrypty/wybierz_teksty.py       # 500 h w 10 częściach po ok. 50 h -> t
 3. czyści markdown: usuwa nagłówki, tabele, bloki kodu, znaczniki list, pogrubienia, etykiety punktów
    („**Wsparcie**: …” → sama treść), emoji; odrzuca zdania z adresami, wzorami, szablonami w nawiasach
    kwadratowych i znakami, których nie da się przeczytać;
-4. tnie odpowiedzi na fragmenty 1–3 sąsiednich zdań o długości 1–15 s (14–210 znaków przy 14 znakach/s),
-   nigdy w środku zdania; pytania użytkownika bierze tylko w całości;
-5. usuwa powtórki i zapisuje `teksty/fragmenty.jsonl`: 809 248 fragmentów, ok. 1860 h mowy (305 MB, poza repo).
+4. tnie odpowiedzi na fragmenty z całych sąsiednich zdań, nigdy w środku zdania. Każdy fragment losuje
+   długość docelową między 3 s a 60 s (logarytmicznie równomiernie, więc krótkich jest więcej) i zbiera
+   zdania, aż ją osiągnie; limit to 60 s, czyli 840 znaków przy 14 znakach/s (`--max-sekund`,
+   `--cel-od-sekund`). Pytania użytkownika bierze tylko w całości;
+5. usuwa powtórki i zapisuje `teksty/fragmenty.jsonl`: 520 488 fragmentów, ok. 2010 h mowy (poza repo).
+
+Rozkład długości w `fragmenty.jsonl`: mediana 10,6 s, p90 27,9 s; 68% klipów ma do 15 s, ale 60% czasu
+przypada na klipy dłuższe niż 15 s (25% czasu na dłuższe niż 30 s). Długie fragmenty powstają m.in. ze
+sklejonych punktów list (bez etykiet), więc bywają wyliczeniem kilku rad pod rząd.
 
 Liczby i skróty zostają surowe, zgodnie z `PLAN.md`.
 
@@ -218,11 +224,11 @@ Liczby i skróty zostają surowe, zgodnie z `PLAN.md`.
 - każda rozmowa trafia w całości do jednej części (pole `czesc`, 0–9), a każda część ma ten sam rozkład
   tematów. Części są rozłączne, więc kolejne można syntezować później, np. innymi głosami.
 
-Wynik: 229 946 fragmentów z 38 906 rozmów (87 MB, poza repo), 29% to pytania użytkownika; długości:
-2% poniżej 2 s, 21% 2–5 s, 49% 5–10 s, 28% 10–15 s. Części mają 49,0–50,5 h. Czas jest szacunkiem z liczby
-znaków — faktyczny wyjdzie po syntezie.
+Wynik: 151 364 fragmenty z 30 613 rozmów (poza repo), 35% to pytania użytkownika. Klipy: 17% do 5 s,
+57% 5–15 s, 21% 15–30 s, 5% ponad 30 s; w czasie odpowiednio 5%, 43%, 36% i 16%. Części mają 49,4–50,4 h.
+Czas jest szacunkiem z liczby znaków — faktyczny wyjdzie po syntezie.
 
-**Teraz syntezujemy tylko część 0** (ok. 50 h, 23 133 fragmenty) głosem „poziomka”: `generuj.py --czesc 0`.
+**Teraz syntezujemy tylko część 0** (ok. 50 h, 15 181 fragmentów) głosem „poziomka”: `generuj.py --czesc 0`.
 Katalog `teksty/` nie jest w repo; na każdej maszynie oba skrypty dają identyczne pliki.
 
 Pola wiersza: `id`, `tekst`, `zrodlo_id` (id rozmowy, do podziału na walidację i test), `rola`, `tura`,
@@ -230,7 +236,7 @@ Pola wiersza: `id`, `tekst`, `zrodlo_id` (id rozmowy, do podziału na walidację
 
 ## 7. Strojenie przepustowości (jedna karta)
 
-Zestaw próbny: 500 pierwszych fragmentów części 9 (ok. 1 h mowy; część 0 zostaje nietknięta na właściwy przebieg).
+Zestaw próbny: 500 pierwszych fragmentów części 9 (ok. 1,5 h mowy, z klipami do 60 s; część 0 zostaje nietknięta na właściwy przebieg).
 Skrypt na końcu wypisuje „N× czas rzeczywisty” łącznie i na kartę.
 
 ```bash
@@ -247,6 +253,10 @@ W drugim terminalu: `watch -n1 nvidia-smi` (pamięć i obciążenie).
   przestaje rosnąć.
 - `--pamiec` — ułamek VRAM dla silnika (domyślnie 0,8). Przy braku pamięci zmniejszyć do 0,7 albo obniżyć
   `--rownolegle`. Graf CUDA dyfuzji bierze dodatkowo ok. 2,5 GB.
+- Klipy do 60 s to dłuższe sekwencje niż w benchmarku autora, więc pamięć na żądanie jest większa —
+  zacząć strojenie od niższych wartości `--rownolegle` i patrzeć na VRAM.
+- `--max-krokow` (domyślnie 700) ucina generację, która się nie zatrzymała: 1 krok to 0,16 s audio
+  (25 Hz latentów, po 4 na krok), więc 700 kroków = 112 s; klip 60 s to ok. 375 kroków.
 - `--cfg` (domyślnie 2.0; plan: 2.0–2.5), `--kroki` (domyślnie 10).
 
 ## 8. Przebieg na wielu kartach
@@ -266,8 +276,13 @@ python skrypty/generuj.py --pomin 0,2 \
   Można też wznowić na innym zestawie kart (np. gdy jedna padnie: dopisać ją do `--pomin`).
 - Nieudane teksty trafiają do `wyniki/etap1/bledy.jsonl` i nie zatrzymują przebiegu; po ponownym uruchomieniu
   są próbowane od nowa.
-- Jeśli proces którejś karty zginie (np. brak pamięci), żądania do niej kończą się błędami — przerwać
-  (Ctrl+C), poprawić `--rownolegle`/`--pamiec` albo pominąć kartę i wznowić.
+- Jeśli proces którejś karty zginie (np. brak pamięci), skrypt sam przerywa przebieg po 50 błędach z rzędu
+  (`--max-bledow-z-rzedu`) — poprawić `--rownolegle`/`--pamiec` albo pominąć kartę i wznowić.
+- Wznowienie wymaga tych samych `--teksty`, `--czesc` i `--wyjscie`; karty, `--rownolegle` i `--pamiec` można
+  zmienić. Zmiana `--glos`, `--tryb` albo `--cfg` w połowie da zbiór mieszany (manifest zapisuje je przy każdym
+  klipie, więc da się to wykryć).
+- Po twardym przerwaniu (kill -9, zanik zasilania) urwany ostatni wiersz manifestu jest obcinany przy starcie.
+- Nie uruchamiać dwóch przebiegów naraz na tym samym `--wyjscie` — nie ma blokady, klipy by się dublowały.
 - Ponowne próby dla złych klipów (do 3 na tekst, `PLAN.md`) należą do filtra jakości, nie do tego skryptu:
   odrzucone `id` usunąć z manifestu i uruchomić jeszcze raz.
 
@@ -280,12 +295,12 @@ import json
 w = [json.loads(l) for l in open("wyniki/etap1/manifest.jsonl", encoding="utf-8")]
 s = [x["sekundy"] for x in w]
 print(f"{len(w)} klipów, {sum(s)/3600:.2f} h, średnio {sum(s)/len(s):.1f} s, najdłuższy {max(s):.1f} s")
-print("podejrzanie długie (>30 s):", sum(x > 30 for x in s))
+print("podejrzanie długie (>90 s):", sum(x > 90 for x in s))
 EOF
 ```
 
 Klipy dużo dłuższe, niż wynikałoby z tekstu, to zwykle generacja, która się nie zatrzymała (limit
-`--max-krokow`, domyślnie 2000) — wyłapie je filtr stosunku długości z `PLAN.md`.
+`--max-krokow`, domyślnie 700 = 112 s) — wyłapie je filtr stosunku długości z `PLAN.md`.
 
 ## 10. Problemy
 
