@@ -1,0 +1,8 @@
+# Środowisko syntezy: Python 3.12, Linux x86_64, CUDA 12.8. Instalacja: RUNBOOK.md, krok 2.
+# torch jest przypięty do 2.8, bo to najnowsza wersja, dla której flash-attn 2.x ma gotowe koło
+# (wydanie v2.8.3.post2: torch 2.4–2.8, cu12). Zmiana wersji torch albo Pythona = zmiana adresu koła.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.8.0
+torchaudio==2.8.0
+flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post2/flash_attn-2.8.3.post2+cu12torch2.8cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
+nano-vllm-voxcpm==2.0.5
