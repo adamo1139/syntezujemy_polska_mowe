@@ -316,8 +316,9 @@ python skrypty/wyslij_na_hf.py --repo UZYTKOWNIK/NAZWA
   `id`, `sekundy`, `glos`, `zrodlo_id`, `rola`, `tura`, `temat`, `czesc`, `jakosc`, `pytanie`.
 - Kopia w parquet zajmuje tyle samo co audio (367,7 h to ok. 61 GB); skrypt sprawdza wolne miejsce przed
   startem. Inny dysk: `--paczki KATALOG`.
-- Repo powstaje jako **prywatne**; publiczne dopiero z `--publiczne` (albo przełączone później na stronie).
-- Oba etapy da się wznowić tym samym poleceniem. Osobno: `--tylko-pakuj`, `--tylko-wyslij`.
+- Repo powstaje jako **prywatne**; `--publiczne` tworzy je jako publiczne albo przełącza już istniejące.
+- Oba etapy da się wznowić tym samym poleceniem; gdy pełny zestaw parquet już leży, pakowanie jest pomijane
+  w całości i karta zostaje nietknięta. Osobno: `--tylko-pakuj`, `--tylko-wyslij`.
 - Karta mówi wprost, że klipy nie przeszły jeszcze filtra jakości.
 
 ## 11. Problemy

@@ -4,8 +4,9 @@
 Format: kolumny `audio` (plik FLAC w środku, typ Audio z `datasets`) i `text`, plus metadane z manifestu.
 Pliki `data/train-NNNNN-of-MMMMM.parquet` po ok. 500 MB i karta `README.md`.
 
-Oba etapy da się wznowić: gotowe pliki parquet są pomijane, a wysyłka (upload_large_folder)
-kontynuuje od miejsca przerwania. Repo jest tworzone jako prywatne, chyba że podasz --publiczne.
+Jeśli pełny zestaw plików parquet już leży w katalogu paczek, pakowanie jest pomijane w całości
+(karta README.md też zostaje nietknięta). Oba etapy da się wznowić: gotowe pliki parquet są pomijane, a wysyłka
+jest kontynuowana od miejsca przerwania. Repo jest tworzone jako prywatne, chyba że podasz --publiczne.
 
 Wymaga: pyarrow, huggingface_hub (uv pip install pyarrow) i zalogowania (hf auth login).
 
@@ -88,6 +89,19 @@ def zaplanuj_pliki(katalog: Path, wiersze: list[dict], mb_na_plik: int) -> list[
     if brakujace:
         sys.exit(f"Brakuje {len(brakujace)} plików audio z manifestu, np. {brakujace[:3]} — nie pakuję niepełnego zbioru.")
     return pliki
+
+
+def paczki_kompletne(paczki: Path) -> int:
+    """Liczba plików parquet, jeśli w katalogu leży pełny, dokończony zestaw i karta; inaczej 0."""
+    dane = paczki / "data"
+    if not dane.is_dir() or list(dane.glob("*.tmp")) or not (paczki / "README.md").is_file():
+        return 0
+    pliki = sorted(dane.glob("train-*-of-*.parquet"))
+    if not pliki:
+        return 0
+    ile = int(pliki[0].stem.rsplit("-of-", 1)[1])
+    oczekiwane = [f"train-{i:05d}-of-{ile:05d}.parquet" for i in range(ile)]
+    return ile if [plik.name for plik in pliki] == oczekiwane else 0
 
 
 def schemat(czestotliwosc: int):
@@ -229,7 +243,11 @@ def main() -> None:
     wyniki = Path(args.wyniki)
     paczki = Path(args.paczki) if args.paczki else wyniki.with_name(wyniki.name + "_parquet")
 
-    if not args.tylko_wyslij:
+    gotowe = paczki_kompletne(paczki)
+    if gotowe and not args.tylko_wyslij:
+        print(f"Dane już spakowane: {gotowe} plików parquet i karta w {paczki} — nie pakuję od nowa.")
+        print("  (żeby spakować ponownie, usuń ten katalog)")
+    elif not args.tylko_wyslij:
         import soundfile as sf
 
         t0 = time.time()
@@ -277,7 +295,20 @@ def main() -> None:
         sys.exit("Brak zalogowania do HF: uruchom `hf auth login` (token z prawem zapisu).")
     print(f"Wysyłam jako {kto} do datasetu {args.repo} ({'publiczny' if args.publiczne else 'prywatny'})...")
     api.create_repo(args.repo, repo_type="dataset", private=not args.publiczne, exist_ok=True)
-    api.upload_large_folder(repo_id=args.repo, repo_type="dataset", folder_path=str(paczki))
+    if args.publiczne:
+        # create_repo nie zmienia widoczności repo, które już istnieje (np. utworzonego wcześniej jako prywatne).
+        api.update_repo_settings(args.repo, repo_type="dataset", private=False)
+    if hasattr(api, "upload_large_folder"):
+        # Starsze huggingface_hub: osobna funkcja do dużych katalogów, ze wznawianiem.
+        api.upload_large_folder(repo_id=args.repo, repo_type="dataset", folder_path=str(paczki))
+    else:
+        # Nowsze huggingface_hub: upload_folder samo dzieli duży katalog na kilka commitów i wznawia przerwaną wysyłkę.
+        api.upload_folder(
+            repo_id=args.repo,
+            repo_type="dataset",
+            folder_path=str(paczki),
+            commit_message="Dodaj dane (parquet) i kartę datasetu",
+        )
     print(f"Gotowe: https://huggingface.co/datasets/{args.repo}")
 
 
