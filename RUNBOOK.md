@@ -4,10 +4,11 @@ Instalacja silnika `nano-vllm-voxcpm`, próba na jednej karcie, strojenie i prze
 z możliwością pominięcia dowolnych (np. 0 albo 2). Kontekst i decyzje: `PLAN.md`.
 
 **Stan (2026-11-20):** spisane na podstawie kodu `nano-vllm-voxcpm` 2.0.5 (PyPI, 2026-10-12; repo
-`a710128/nanovllm-voxcpm`, commit `b839543`). **Nie było jeszcze uruchomione na maszynie z 3090 Ti** —
-na komputerze, na którym to powstało, jest tylko RTX 5080. W `skrypty/generuj.py` sprawdzony jest wybór kart,
-a sama synteza nie. Pierwsze przejście kroków 2–5 potraktować jako test i poprawić runbook tam, gdzie
-rzeczywistość się rozjedzie.
+`a710128/nanovllm-voxcpm`, commit `b839543`). Na rigu (8× 3090 Ti) przeszły kroki 2–5: instalacja z
+`wymagania.txt`, model w `HF_HOME` i próba dwóch zdań na karcie 1 (start 37 s, 48 kHz, bez błędów).
+Teksty (krok 6) są przygotowane i sprawdzone poza rigiem. Strojenie (krok 7) i przebieg na wielu kartach
+(krok 8) nie były jeszcze uruchamiane — wartości domyślne
+`--rownolegle` i `--pamiec` pochodzą z benchmarku autora na RTX 4090, nie z pomiaru.
 
 ## 1. Wymagania
 
@@ -159,6 +160,10 @@ Pierwsze uruchomienie trwa dłużej (ładowanie modelu, przechwytywanie grafów 
 `wyniki/proba/audio/*.flac` (48 kHz mono) i `wyniki/proba/manifest.jsonl`. Odsłuchaj oba klipy i porównaj
 barwę z `glosy/poziomka.wav`.
 
+Przy starcie pojawiają się dwa ostrzeżenia, które można pominąć: `FutureWarning` o `weight_norm` oraz
+`torch._dynamo hit config.recompile_limit` dla funkcji `snake` w AudioVAE. Wynik „N× czas rzeczywisty”
+z dwóch zdań nic nie mówi o przepustowości (na rigu wyszło 5×) — to mierzy dopiero krok 7.
+
 Głos (domyślnie `glosy/poziomka.wav` jako wzorzec barwy):
 
 | flaga | znaczenie |
@@ -169,23 +174,68 @@ Głos (domyślnie `glosy/poziomka.wav` jako wzorzec barwy):
 | `--glos glosy/poziomka_dluga.wav` | dłuższa referencja |
 | `--glos brak` | bez wzorca: losowy mówca w każdym klipie |
 
-Porównanie trybów i referencji (z `PLAN.md`) — te same teksty do osobnych katalogów:
+Porównanie trybów i referencji (z `PLAN.md`) — te same teksty (50 pierwszych
+z części 9, której na razie nie syntezujemy) do osobnych katalogów:
 
 ```bash
 for tryb in referencja prompt oba; do
-  python skrypty/generuj.py --karty 1 --teksty teksty/proba.txt --limit 50 \
+  python skrypty/generuj.py --karty 1 --teksty teksty/wybrane.jsonl --czesc 9 --limit 50 \
     --tryb $tryb --wyjscie wyniki/tryb_$tryb
 done
 ```
 
-## 6. Strojenie przepustowości (jedna karta)
+## 6. Teksty do syntezy
 
-Plik z kilkuset tekstami o docelowym rozkładzie długości (`.txt`, jeden na wiersz, albo `.jsonl` z polami
-`id`, `tekst`). Skrypt na końcu wypisuje „N× czas rzeczywisty” łącznie i na kartę.
+Źródło: `cpral/polskie-sprawy-v8-jakosc50` (`sft.jsonl`, 2,2 GB, 539 252 rozmowy). Dwa skrypty, oba
+deterministyczne (to samo `--ziarno` daje ten sam plik), bez GPU, tylko biblioteka standardowa i `huggingface_hub`.
+
+```bash
+python skrypty/przygotuj_teksty.py     # pobiera dataset do HF_HOME; ok. 1 min pracy -> teksty/fragmenty.jsonl
+python skrypty/wybierz_teksty.py       # 500 h w 10 częściach po ok. 50 h -> teksty/wybrane.jsonl
+```
+
+`przygotuj_teksty.py` (lokalna kopia zamiast pobierania: `--zrodlo /sciezka/sft.jsonl`):
+
+1. odrzuca rozmowy, w których `meta.model` albo którykolwiek z `meta.turn_models` to `private`
+   (33 158 rozmów; licencja CC-BY-NC, reszta jest na Apache-2.0);
+2. z pozostałych 506 094 zostawia górne 10% według `jakosc.ocena` — próg 70,9, czyli 50 835 rozmów
+   (`--percentyl 90`);
+3. czyści markdown: usuwa nagłówki, tabele, bloki kodu, znaczniki list, pogrubienia, etykiety punktów
+   („**Wsparcie**: …” → sama treść), emoji; odrzuca zdania z adresami, wzorami, szablonami w nawiasach
+   kwadratowych i znakami, których nie da się przeczytać;
+4. tnie odpowiedzi na fragmenty 1–3 sąsiednich zdań o długości 1–15 s (14–210 znaków przy 14 znakach/s),
+   nigdy w środku zdania; pytania użytkownika bierze tylko w całości;
+5. usuwa powtórki i zapisuje `teksty/fragmenty.jsonl`: 809 248 fragmentów, ok. 1860 h mowy (305 MB, poza repo).
+
+Liczby i skróty zostają surowe, zgodnie z `PLAN.md`.
+
+`wybierz_teksty.py` bierze z tego 500 h (`--godziny`) i dzieli na 10 części (`--czesci`):
+
+- tematy na zmianę, bo w górnych 10% jakości dwa tematy (rodzina, praca) to 70% fragmentów. Przy 500 h
+  26 z 31 tematów wchodzi w całości, a trzy największe mają po ok. 12,5% czasu;
+- przy jednych odwiedzinach rozmowy 1 pytanie użytkownika i 2 fragmenty odpowiedzi (`--pytan`, `--odpowiedzi`);
+  gdy tematowi skończą się nowe rozmowy, wraca do tych samych po kolejne fragmenty;
+- każda rozmowa trafia w całości do jednej części (pole `czesc`, 0–9), a każda część ma ten sam rozkład
+  tematów. Części są rozłączne, więc kolejne można syntezować później, np. innymi głosami.
+
+Wynik: 229 946 fragmentów z 38 906 rozmów (87 MB, poza repo), 29% to pytania użytkownika; długości:
+2% poniżej 2 s, 21% 2–5 s, 49% 5–10 s, 28% 10–15 s. Części mają 49,0–50,5 h. Czas jest szacunkiem z liczby
+znaków — faktyczny wyjdzie po syntezie.
+
+**Teraz syntezujemy tylko część 0** (ok. 50 h, 23 133 fragmenty) głosem „poziomka”: `generuj.py --czesc 0`.
+Katalog `teksty/` nie jest w repo; na każdej maszynie oba skrypty dają identyczne pliki.
+
+Pola wiersza: `id`, `tekst`, `zrodlo_id` (id rozmowy, do podziału na walidację i test), `rola`, `tura`,
+`zdania`, `znaki`, `pytanie`, `temat`, `jakosc`, `czesc`. `generuj.py` przepisuje je wszystkie do manifestu.
+
+## 7. Strojenie przepustowości (jedna karta)
+
+Zestaw próbny: 500 pierwszych fragmentów części 9 (ok. 1 h mowy; część 0 zostaje nietknięta na właściwy przebieg).
+Skrypt na końcu wypisuje „N× czas rzeczywisty” łącznie i na kartę.
 
 ```bash
 for n in 8 16 32 48; do
-  python skrypty/generuj.py --karty 1 --teksty teksty/proba.txt --limit 400 \
+  python skrypty/generuj.py --karty 1 --teksty teksty/wybrane.jsonl --czesc 9 --limit 500 \
     --rownolegle $n --wyjscie wyniki/strojenie_$n
 done
 ```
@@ -199,14 +249,14 @@ W drugim terminalu: `watch -n1 nvidia-smi` (pamięć i obciążenie).
   `--rownolegle`. Graf CUDA dyfuzji bierze dodatkowo ok. 2,5 GB.
 - `--cfg` (domyślnie 2.0; plan: 2.0–2.5), `--kroki` (domyślnie 10).
 
-## 7. Przebieg na wielu kartach
+## 8. Przebieg na wielu kartach
 
 ```bash
 tmux new -s synteza
 source .venv/bin/activate
 
 python skrypty/generuj.py --pomin 0,2 \
-  --teksty teksty/etap1.jsonl --wyjscie wyniki/etap1 \
+  --teksty teksty/wybrane.jsonl --czesc 0 --wyjscie wyniki/etap1 \
   --rownolegle 16 2>&1 | tee -a wyniki/etap1.log
 ```
 
@@ -221,7 +271,7 @@ python skrypty/generuj.py --pomin 0,2 \
 - Ponowne próby dla złych klipów (do 3 na tekst, `PLAN.md`) należą do filtra jakości, nie do tego skryptu:
   odrzucone `id` usunąć z manifestu i uruchomić jeszcze raz.
 
-## 8. Kontrola wyników
+## 9. Kontrola wyników
 
 ```bash
 wc -l wyniki/etap1/manifest.jsonl
@@ -237,7 +287,7 @@ EOF
 Klipy dużo dłuższe, niż wynikałoby z tekstu, to zwykle generacja, która się nie zatrzymała (limit
 `--max-krokow`, domyślnie 2000) — wyłapie je filtr stosunku długości z `PLAN.md`.
 
-## 9. Problemy
+## 10. Problemy
 
 | objaw | przyczyna i wyjście |
 |---|---|

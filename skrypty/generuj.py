@@ -129,6 +129,12 @@ def wczytaj_teksty(args: argparse.Namespace) -> list[dict]:
                 pozycja["id"] = f"{nr:07d}_{skrot}"
             pozycja["id"] = str(pozycja["id"])
             pozycje.append(pozycja)
+    if args.czesc is not None:
+        if any("czesc" not in pozycja for pozycja in pozycje):
+            sys.exit(f"--czesc: {sciezka} nie ma pola „czesc” (plik z wybierz_teksty.py).")
+        pozycje = [pozycja for pozycja in pozycje if pozycja["czesc"] == args.czesc]
+        if not pozycje:
+            sys.exit(f"--czesc {args.czesc}: nie ma takiej części w {sciezka}.")
     if args.limit:
         pozycje = pozycje[: args.limit]
     return pozycje
@@ -279,7 +285,8 @@ def main() -> None:
     g = p.add_argument_group("wejście i wyjście")
     g.add_argument("--teksty", help="plik .jsonl (pola id, tekst) albo .txt (jeden tekst na wiersz)")
     g.add_argument("--tekst", action="append", help="pojedynczy tekst (można powtórzyć) zamiast pliku")
-    g.add_argument("--limit", type=int, help="weź tylko N pierwszych tekstów z pliku")
+    g.add_argument("--czesc", type=int, help="weź tylko teksty z tej części (pole „czesc” z wybierz_teksty.py)")
+    g.add_argument("--limit", type=int, help="weź tylko N pierwszych tekstów (po --czesc)")
     g.add_argument("--wyjscie", default="wyniki/proba", help="katalog na audio/ i manifest.jsonl")
 
     g = p.add_argument_group("model i głos")
