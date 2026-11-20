@@ -6,9 +6,10 @@ z możliwością pominięcia dowolnych (np. 0 albo 2). Kontekst i decyzje: `PLAN
 **Stan (2026-11-20):** spisane na podstawie kodu `nano-vllm-voxcpm` 2.0.5 (PyPI, 2026-10-12; repo
 `a710128/nanovllm-voxcpm`, commit `b839543`). Na rigu (8× 3090 Ti) przeszły kroki 2–5: instalacja z
 `wymagania.txt`, model w `HF_HOME` i próba dwóch zdań na karcie 1 (start 37 s, 48 kHz, bez błędów).
-Teksty (krok 6) są przygotowane i sprawdzone poza rigiem. Strojenie (krok 7) i przebieg na wielu kartach
-(krok 8) nie były jeszcze uruchamiane — wartości domyślne
-`--rownolegle` i `--pamiec` pochodzą z benchmarku autora na RTX 4090, nie z pomiaru.
+Pełny przebieg (kroki 6–8) też: 151 364 klipy, 367,7 h audio w 6005 s na 6 kartach z `--rownolegle 32`,
+bez błędów. Średnio 220× czas rzeczywisty; na starcie 295×, potem spadek, bo dysk z wynikami przegrzał się
+do 79 °C i dławił zapis (patrz Problemy). Jedna karta ze strojenia: 32× / 43× / 52× przy 8 / 16 / 32.
+Głos mówi ok. 18,7 znaku/s, nie 14 jak w `PLAN.md`, więc „500 h” tekstu dało 367,7 h audio.
 
 ## 1. Wymagania
 
@@ -302,7 +303,24 @@ EOF
 Klipy dużo dłuższe, niż wynikałoby z tekstu, to zwykle generacja, która się nie zatrzymała (limit
 `--max-krokow`, domyślnie 700 = 112 s) — wyłapie je filtr stosunku długości z `PLAN.md`.
 
-## 10. Problemy
+## 10. Wysyłka na HF
+
+```bash
+uv pip install pyarrow
+hf auth login                         # token z prawem zapisu
+python skrypty/wyslij_na_hf.py --repo UZYTKOWNIK/NAZWA
+```
+
+- Pakuje `wyniki/poziomka` (`--wyniki`) do plików parquet po ok. 500 MB w `wyniki/poziomka_parquet/data/`
+  i dopisuje kartę `README.md`. Kolumny: `audio` (FLAC w środku, typ Audio z `datasets`), `text`, oraz
+  `id`, `sekundy`, `glos`, `zrodlo_id`, `rola`, `tura`, `temat`, `czesc`, `jakosc`, `pytanie`.
+- Kopia w parquet zajmuje tyle samo co audio (367,7 h to ok. 61 GB); skrypt sprawdza wolne miejsce przed
+  startem. Inny dysk: `--paczki KATALOG`.
+- Repo powstaje jako **prywatne**; publiczne dopiero z `--publiczne` (albo przełączone później na stronie).
+- Oba etapy da się wznowić tym samym poleceniem. Osobno: `--tylko-pakuj`, `--tylko-wyslij`.
+- Karta mówi wprost, że klipy nie przeszły jeszcze filtra jakości.
+
+## 11. Problemy
 
 | objaw | przyczyna i wyjście |
 |---|---|
@@ -313,4 +331,5 @@ Klipy dużo dłuższe, niż wynikałoby z tekstu, to zwykle generacja, która si
 | `CUDA out of memory` przy starcie albo pod obciążeniem | karta zajęta przez coś innego (pominąć ją) albo za wysokie `--pamiec` / `--rownolegle` |
 | numery kart nie zgadzają się z `nvidia-smi` | w powłoce jest ustawione własne `CUDA_VISIBLE_DEVICES`; skrypt je nadpisuje, ale `nvidia-smi` zawsze pokazuje numerację fizyczną — porównywać z `--lista-kart` |
 | skrypt kończy się „Brak terminala do zadania pytania” | uruchomienie bez terminala; dodać `--karty` albo `--pomin` |
+| tempo spada w trakcie, użycie kart faluje, wysokie `wa` w `top` | dysk z wynikami się dławi: sprawdzić temperaturę (`sensors`, `sudo nvme smart-log /dev/nvme0n1`) i nawiew; przebiegu nie trzeba przerywać |
 | wolno mimo wolnych kart | za mało rdzeni CPU (jeden proces na kartę kręci się w pętli) albo zapis na wolny dysk |

@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""Pakuje wynik syntezy (manifest.jsonl + audio/*.flac) do plików parquet i wysyła jako dataset na HF.
+
+Format: kolumny `audio` (plik FLAC w środku, typ Audio z `datasets`) i `text`, plus metadane z manifestu.
+Pliki `data/train-NNNNN-of-MMMMM.parquet` po ok. 500 MB i karta `README.md`.
+
+Oba etapy da się wznowić: gotowe pliki parquet są pomijane, a wysyłka (upload_large_folder)
+kontynuuje od miejsca przerwania. Repo jest tworzone jako prywatne, chyba że podasz --publiczne.
+
+Wymaga: pyarrow, huggingface_hub (uv pip install pyarrow) i zalogowania (hf auth login).
+
+Przykłady:
+  python skrypty/wyslij_na_hf.py --repo UZYTKOWNIK/NAZWA
+  python skrypty/wyslij_na_hf.py --repo UZYTKOWNIK/NAZWA --tylko-pakuj
+  python skrypty/wyslij_na_hf.py --repo UZYTKOWNIK/NAZWA --tylko-wyslij --publiczne
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import json
+import shutil
+import sys
+import time
+from pathlib import Path
+
+KATALOG_PROJEKTU = Path(__file__).resolve().parent.parent
+
+# Kolumny wynikowe: (nazwa, pole manifestu, typ pyarrow jako tekst, typ `datasets`).
+KOLUMNY = [
+    ("id", "id", "string", "string"),
+    ("text", "tekst", "string", "string"),
+    ("sekundy", "sekundy", "float32", "float32"),
+    ("glos", "glos", "string", "string"),
+    ("zrodlo_id", "zrodlo_id", "string", "string"),
+    ("rola", "rola", "string", "string"),
+    ("tura", "tura", "int32", "int32"),
+    ("temat", "temat", "string", "string"),
+    ("czesc", "czesc", "int32", "int32"),
+    ("jakosc", "jakosc", "float32", "float32"),
+    ("pytanie", "pytanie", "bool", "bool"),
+]
+
+
+def wczytaj_manifest(katalog: Path) -> list[dict]:
+    manifest = katalog / "manifest.jsonl"
+    if not manifest.is_file():
+        sys.exit(f"Nie ma {manifest}")
+    wiersze, widziane = [], set()
+    with manifest.open(encoding="utf-8") as plik:
+        for nr, wiersz in enumerate(plik, 1):
+            if not wiersz.strip():
+                continue
+            wpis = json.loads(wiersz)
+            if wpis["id"] in widziane:
+                sys.exit(f"{manifest}:{nr}: powtórzone id {wpis['id']}")
+            widziane.add(wpis["id"])
+            wiersze.append(wpis)
+    # Części obok siebie, a w części fragmenty tej samej rozmowy po kolei.
+    wiersze.sort(key=lambda w: (w.get("czesc") if w.get("czesc") is not None else -1, w["id"]))
+    return wiersze
+
+
+def zaplanuj_pliki(katalog: Path, wiersze: list[dict], mb_na_plik: int) -> list[list[dict]]:
+    """Dzieli wiersze na pliki po ok. mb_na_plik; zawsze tak samo dla tego samego manifestu."""
+    limit = mb_na_plik * 1_000_000
+    pliki: list[list[dict]] = [[]]
+    rozmiar = 0
+    brakujace = []
+    for wpis in wiersze:
+        sciezka = katalog / wpis["audio"]
+        try:
+            bajty = sciezka.stat().st_size
+        except FileNotFoundError:
+            brakujace.append(wpis["audio"])
+            continue
+        if bajty == 0:
+            brakujace.append(wpis["audio"] + " (pusty)")
+            continue
+        if pliki[-1] and rozmiar + bajty > limit:
+            pliki.append([])
+            rozmiar = 0
+        wpis["_sciezka"] = sciezka
+        wpis["_bajty"] = bajty
+        pliki[-1].append(wpis)
+        rozmiar += bajty
+    if brakujace:
+        sys.exit(f"Brakuje {len(brakujace)} plików audio z manifestu, np. {brakujace[:3]} — nie pakuję niepełnego zbioru.")
+    return pliki
+
+
+def schemat(czestotliwosc: int):
+    import pyarrow as pa
+
+    typy = {"string": pa.string(), "float32": pa.float32(), "int32": pa.int32(), "bool": pa.bool_()}
+    pola = [pa.field("audio", pa.struct([("bytes", pa.binary()), ("path", pa.string())]))]
+    pola += [pa.field(nazwa, typy[typ]) for nazwa, _, typ, _ in KOLUMNY]
+    cechy = {"audio": {"sampling_rate": czestotliwosc, "_type": "Audio"}}
+    cechy.update({nazwa: {"dtype": typ_hf, "_type": "Value"} for nazwa, _, _, typ_hf in KOLUMNY})
+    return pa.schema(pola, metadata={"huggingface": json.dumps({"info": {"features": cechy}})})
+
+
+def zapisz_plik(sciezka: Path, wpisy: list[dict], schemat_pa) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    kolumny = {"audio": [{"bytes": w["_sciezka"].read_bytes(), "path": w["_sciezka"].name} for w in wpisy]}
+    for nazwa, pole, _, _ in KOLUMNY:
+        kolumny[nazwa] = [w.get(pole) for w in wpisy]
+    tabela = pa.Table.from_pydict(kolumny, schema=schemat_pa)
+    tymczasowy = sciezka.with_suffix(".parquet.tmp")
+    # Audio jest już skompresowane (FLAC), więc bez dodatkowej kompresji; małe grupy wierszy dla podglądu na HF.
+    pq.write_table(tabela, tymczasowy, compression="none", row_group_size=100)
+    tymczasowy.rename(sciezka)
+
+
+def karta(repo: str, wiersze: list[dict], czestotliwosc: int, zrodlo_tekstow: str) -> str:
+    godziny = sum(w["sekundy"] for w in wiersze) / 3600
+    glosy = sorted({str(w.get("glos")) for w in wiersze})
+    tryby = sorted({str(w.get("tryb_glosu")) for w in wiersze})
+    cfg = sorted({str(w.get("cfg")) for w in wiersze})
+    kroki = sorted({str(w.get("kroki")) for w in wiersze})
+    rozmowy = len({w.get("zrodlo_id") for w in wiersze})
+    pytania = 100 * sum(1 for w in wiersze if w.get("rola") == "user") / len(wiersze)
+    przedzialy = [("do 5 s", 0, 5), ("5–15 s", 5, 15), ("15–30 s", 15, 30), ("ponad 30 s", 30, 1e9)]
+    wiersze_dlugosci = "\n".join(
+        f"| {nazwa} | {100 * sum(1 for w in wiersze if a <= w['sekundy'] < b) / len(wiersze):.0f}% "
+        f"| {100 * sum(w['sekundy'] for w in wiersze if a <= w['sekundy'] < b) / (godziny * 3600):.0f}% |"
+        for nazwa, a, b in przedzialy
+    )
+    czas_tematow: collections.Counter = collections.Counter()
+    for w in wiersze:
+        czas_tematow[str(w.get("temat"))] += w["sekundy"]
+    wiersze_tematow = "\n".join(f"| {temat} | {sek / 3600:.1f} |" for temat, sek in czas_tematow.most_common())
+    czesci = sorted({w.get("czesc") for w in wiersze if w.get("czesc") is not None})
+    return f"""---
+license: apache-2.0
+language:
+- pl
+task_categories:
+- text-to-speech
+tags:
+- synthetic
+- voxcpm2
+pretty_name: {repo.split("/")[-1]}
+configs:
+- config_name: default
+  data_files:
+  - split: train
+    path: data/train-*.parquet
+---
+
+# {repo.split("/")[-1]}
+
+Syntetyczna polska mowa: {godziny:.1f} h, {len(wiersze)} klipów, jeden głos, {czestotliwosc // 1000} kHz mono (FLAC).
+Zbiór powstał do trenowania małych polskich modeli TTS (destylacja z VoxCPM2).
+
+**Klipy nie przeszły jeszcze filtra jakości.** Kolumna `text` to tekst podany modelowi, a nie zapis tego,
+co model faktycznie powiedział — część klipów może mieć pominięte lub przekręcone słowa.
+
+## Jak powstał
+
+- **Model:** [VoxCPM2](https://huggingface.co/openbmb/VoxCPM2) przez silnik `nano-vllm-voxcpm`;
+  CFG {", ".join(cfg)}, kroki dyfuzji: {", ".join(kroki)}.
+- **Głos:** {", ".join(glosy)} (tryb: {", ".join(tryby)}), jedno nagranie wzorcowe dla wszystkich klipów.
+  Głos jest syntetyczny (wylosowany przez VoxCPM2), nie należy do żadnej osoby.
+- **Teksty:** {zrodlo_tekstow}: rozmowy bez udziału modelu `private`, górne 10% według
+  `jakosc.ocena`, oczyszczone z markdownu i pocięte na fragmenty z całych zdań. Liczby i skróty są w formie
+  surowej (bez normalizacji). {rozmowy} rozmów źródłowych; {pytania:.0f}% klipów to pytania użytkownika,
+  reszta to fragmenty odpowiedzi asystenta.
+- **Kod:** https://github.com/adamo1139/syntezujemy_polska_mowe
+
+## Kolumny
+
+| kolumna | opis |
+|---|---|
+| `audio` | klip FLAC, {czestotliwosc} Hz, mono |
+| `text` | tekst podany modelowi |
+| `id` | identyfikator klipu |
+| `sekundy` | długość klipu |
+| `glos` | nazwa głosu wzorcowego |
+| `zrodlo_id` | id rozmowy źródłowej; dzielić zbiór na trening i test po tym polu, nie po klipach |
+| `rola` | `user` (pytanie w całości) albo `assistant` (fragment odpowiedzi) |
+| `tura` | numer tury w rozmowie |
+| `temat` | temat rozmowy |
+| `czesc` | część zbioru ({len(czesci)} rozłącznych części o tym samym rozkładzie tematów; rozmowa zawsze w jednej) |
+| `jakosc` | ocena jakości rozmowy źródłowej |
+| `pytanie` | czy tekst kończy się znakiem zapytania |
+
+## Długość klipów
+
+| długość | klipy | czas |
+|---|---|---|
+{wiersze_dlugosci}
+
+## Tematy
+
+| temat | godziny |
+|---|---|
+{wiersze_tematow}
+
+## Użycie
+
+```python
+from datasets import load_dataset
+
+ds = load_dataset("{repo}", split="train", streaming=True)
+klip = next(iter(ds))
+print(klip["text"], klip["audio"]["sampling_rate"])
+```
+"""
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--repo", required=True, help="repo datasetu na HF, np. uzytkownik/nazwa")
+    p.add_argument("--wyniki", default=str(KATALOG_PROJEKTU / "wyniki" / "poziomka"), help="katalog z manifest.jsonl i audio/")
+    p.add_argument("--paczki", help="katalog na pliki parquet (domyślnie <wyniki>_parquet)")
+    p.add_argument("--mb-na-plik", type=int, default=500)
+    p.add_argument("--zrodlo-tekstow", default="[cpral/polskie-sprawy-v8-jakosc50](https://huggingface.co/datasets/cpral/polskie-sprawy-v8-jakosc50)")
+    p.add_argument("--publiczne", action="store_true", help="utwórz repo jako publiczne (domyślnie prywatne)")
+    p.add_argument("--tylko-pakuj", action="store_true", help="zapisz parquet i README, nic nie wysyłaj")
+    p.add_argument("--tylko-wyslij", action="store_true", help="wyślij to, co już leży w katalogu paczek")
+    args = p.parse_args()
+    if args.tylko_pakuj and args.tylko_wyslij:
+        p.error("--tylko-pakuj i --tylko-wyslij wykluczają się")
+
+    wyniki = Path(args.wyniki)
+    paczki = Path(args.paczki) if args.paczki else wyniki.with_name(wyniki.name + "_parquet")
+
+    if not args.tylko_wyslij:
+        import soundfile as sf
+
+        t0 = time.time()
+        wiersze = wczytaj_manifest(wyniki)
+        pliki = zaplanuj_pliki(wyniki, wiersze, args.mb_na_plik)
+        razem = sum(w["_bajty"] for w in wiersze)
+        czestotliwosc = sf.info(str(wiersze[0]["_sciezka"])).samplerate
+        katalog_danych = paczki / "data"
+        katalog_danych.mkdir(parents=True, exist_ok=True)
+        nazwy = [katalog_danych / f"train-{i:05d}-of-{len(pliki):05d}.parquet" for i in range(len(pliki))]
+        obce = sorted(set(katalog_danych.glob("*.parquet*")) - set(nazwy))
+        if obce:
+            sys.exit(f"W {katalog_danych} leżą pliki z innego podziału (np. {obce[0].name}) — usuń katalog i zacznij od nowa.")
+        do_zapisu = [(nazwa, wpisy) for nazwa, wpisy in zip(nazwy, pliki) if not nazwa.exists()]
+        potrzeba = sum(w["_bajty"] for _, wpisy in do_zapisu for w in wpisy)
+        wolne = shutil.disk_usage(paczki).free
+        print(
+            f"Klipów: {len(wiersze)}, {sum(w['sekundy'] for w in wiersze) / 3600:.1f} h, {razem / 1e9:.1f} GB audio "
+            f"-> {len(pliki)} plików parquet w {katalog_danych} (gotowych: {len(pliki) - len(do_zapisu)})"
+        )
+        if potrzeba * 1.02 > wolne:
+            sys.exit(f"Za mało miejsca: potrzeba ok. {potrzeba / 1e9:.1f} GB, wolne {wolne / 1e9:.1f} GB. Podaj --paczki na innym dysku.")
+        schemat_pa = schemat(czestotliwosc)
+        for nr, (nazwa, wpisy) in enumerate(do_zapisu, 1):
+            zapisz_plik(nazwa, wpisy, schemat_pa)
+            if nr % 10 == 0 or nr == len(do_zapisu):
+                print(f"  zapisano {nr}/{len(do_zapisu)} plików  [{time.time() - t0:.0f} s]", flush=True)
+        (paczki / "README.md").write_text(karta(args.repo, wiersze, czestotliwosc, args.zrodlo_tekstow), encoding="utf-8")
+        print(f"Karta datasetu: {paczki / 'README.md'}")
+
+    if args.tylko_pakuj:
+        print("Nic nie wysłano (--tylko-pakuj).")
+        return
+
+    if not (paczki / "data").is_dir() or not any((paczki / "data").glob("*.parquet")):
+        sys.exit(f"W {paczki} nie ma plików parquet — najpierw pakowanie.")
+    if list((paczki / "data").glob("*.tmp")):
+        sys.exit(f"W {paczki / 'data'} leży niedokończony plik .tmp — uruchom pakowanie jeszcze raz.")
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    try:
+        kto = api.whoami()["name"]
+    except Exception:
+        sys.exit("Brak zalogowania do HF: uruchom `hf auth login` (token z prawem zapisu).")
+    print(f"Wysyłam jako {kto} do datasetu {args.repo} ({'publiczny' if args.publiczne else 'prywatny'})...")
+    api.create_repo(args.repo, repo_type="dataset", private=not args.publiczne, exist_ok=True)
+    api.upload_large_folder(repo_id=args.repo, repo_type="dataset", folder_path=str(paczki))
+    print(f"Gotowe: https://huggingface.co/datasets/{args.repo}")
+
+
+if __name__ == "__main__":
+    main()
