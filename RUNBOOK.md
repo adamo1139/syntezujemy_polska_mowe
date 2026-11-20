@@ -319,6 +319,8 @@ python skrypty/wyslij_na_hf.py --repo UZYTKOWNIK/NAZWA
 - Repo powstaje jako **prywatne**; `--publiczne` tworzy je jako publiczne albo przełącza już istniejące.
 - Oba etapy da się wznowić tym samym poleceniem; gdy pełny zestaw parquet już leży, pakowanie jest pomijane
   w całości i karta zostaje nietknięta. Osobno: `--tylko-pakuj`, `--tylko-wyslij`.
+- Wysyłka idzie partiami po 10 plików (`--plikow-na-commit`), każda partia to osobny commit; pliki obecne już
+  w repo są pomijane. Jeśli transfer stanie na „0.00B/s” bez błędu: Ctrl+C i to samo polecenie jeszcze raz.
 - Karta mówi wprost, że klipy nie przeszły jeszcze filtra jakości.
 
 ## 11. Problemy

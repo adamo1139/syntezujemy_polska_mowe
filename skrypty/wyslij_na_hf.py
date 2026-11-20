@@ -5,8 +5,8 @@ Format: kolumny `audio` (plik FLAC w środku, typ Audio z `datasets`) i `text`, 
 Pliki `data/train-NNNNN-of-MMMMM.parquet` po ok. 500 MB i karta `README.md`.
 
 Jeśli pełny zestaw plików parquet już leży w katalogu paczek, pakowanie jest pomijane w całości
-(karta README.md też zostaje nietknięta). Oba etapy da się wznowić: gotowe pliki parquet są pomijane, a wysyłka
-jest kontynuowana od miejsca przerwania. Repo jest tworzone jako prywatne, chyba że podasz --publiczne.
+(karta README.md też zostaje nietknięta). Wysyłka idzie partiami po 10 plików, każda partia to osobny
+commit; po przerwaniu to samo polecenie pomija pliki, które są już w repo. Repo jest tworzone jako prywatne, chyba że podasz --publiczne.
 
 Wymaga: pyarrow, huggingface_hub (uv pip install pyarrow) i zalogowania (hf auth login).
 
@@ -226,6 +226,41 @@ print(klip["text"], klip["audio"]["sampling_rate"])
 """
 
 
+def wyslij_partiami(api, repo: str, paczki: Path, na_commit: int, prob: int = 5) -> None:
+    """Wysyła kartę, a potem pliki parquet partiami: każda partia to osobny commit.
+
+    Po przerwaniu to samo polecenie pomija pliki, które są już w repo, więc traci się najwyżej jedną partię.
+    """
+    w_repo = set(api.list_repo_files(repo, repo_type="dataset"))
+    wszystkie = sorted(plik.name for plik in (paczki / "data").glob("*.parquet"))
+    brakujace = [nazwa for nazwa in wszystkie if f"data/{nazwa}" not in w_repo]
+    print(f"Plików parquet: {len(wszystkie)}, już w repo: {len(wszystkie) - len(brakujace)}, do wysłania: {len(brakujace)}")
+
+    def wyslij(wzorce: list[str], opis: str) -> None:
+        for proba in range(1, prob + 1):
+            try:
+                api.upload_folder(
+                    repo_id=repo, repo_type="dataset", folder_path=str(paczki), allow_patterns=wzorce, commit_message=opis
+                )
+                return
+            except KeyboardInterrupt:
+                raise
+            except Exception as blad:
+                if proba == prob:
+                    raise
+                czekaj = 30 * proba
+                print(f"  błąd ({blad!r}); próba {proba}/{prob}, ponawiam za {czekaj} s", flush=True)
+                time.sleep(czekaj)
+
+    wyslij(["README.md"], "Karta datasetu")
+    t0 = time.time()
+    for i in range(0, len(brakujace), na_commit):
+        partia = brakujace[i : i + na_commit]
+        wyslij([f"data/{nazwa}" for nazwa in partia], f"Dane: {partia[0]} – {partia[-1]}")
+        zrobione = i + len(partia)
+        print(f"  w repo {len(wszystkie) - len(brakujace) + zrobione}/{len(wszystkie)} plików  [{time.time() - t0:.0f} s]", flush=True)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--repo", required=True, help="repo datasetu na HF, np. uzytkownik/nazwa")
@@ -233,6 +268,7 @@ def main() -> None:
     p.add_argument("--paczki", help="katalog na pliki parquet (domyślnie <wyniki>_parquet)")
     p.add_argument("--mb-na-plik", type=int, default=500)
     p.add_argument("--zrodlo-tekstow", default="[cpral/polskie-sprawy-v8-jakosc50](https://huggingface.co/datasets/cpral/polskie-sprawy-v8-jakosc50)")
+    p.add_argument("--plikow-na-commit", type=int, default=10, help="ile plików parquet w jednej partii wysyłki (jeden commit)")
     p.add_argument("--publiczne", action="store_true", help="utwórz repo jako publiczne (domyślnie prywatne)")
     p.add_argument("--tylko-pakuj", action="store_true", help="zapisz parquet i README, nic nie wysyłaj")
     p.add_argument("--tylko-wyslij", action="store_true", help="wyślij to, co już leży w katalogu paczek")
@@ -298,17 +334,7 @@ def main() -> None:
     if args.publiczne:
         # create_repo nie zmienia widoczności repo, które już istnieje (np. utworzonego wcześniej jako prywatne).
         api.update_repo_settings(args.repo, repo_type="dataset", private=False)
-    if hasattr(api, "upload_large_folder"):
-        # Starsze huggingface_hub: osobna funkcja do dużych katalogów, ze wznawianiem.
-        api.upload_large_folder(repo_id=args.repo, repo_type="dataset", folder_path=str(paczki))
-    else:
-        # Nowsze huggingface_hub: upload_folder samo dzieli duży katalog na kilka commitów i wznawia przerwaną wysyłkę.
-        api.upload_folder(
-            repo_id=args.repo,
-            repo_type="dataset",
-            folder_path=str(paczki),
-            commit_message="Dodaj dane (parquet) i kartę datasetu",
-        )
+    wyslij_partiami(api, args.repo, paczki, args.plikow_na_commit)
     print(f"Gotowe: https://huggingface.co/datasets/{args.repo}")
 
 
