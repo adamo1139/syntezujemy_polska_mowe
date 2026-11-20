@@ -36,7 +36,29 @@ Zapisz numery kart, które są zajęte albo mają zostać wolne — przydadzą s
 ```bash
 git clone https://github.com/adamo1139/syntezujemy_polska_mowe.git
 cd syntezujemy_polska_mowe
+```
 
+### 2.0 Pamięć podręczna uv poza dyskiem głównym (rig)
+
+Na rigu dysk główny nie ma miejsca na pamięć podręczną uv (same koła torch i flash-attn to kilka GB),
+więc dla tego projektu idzie ona na `/media/nvme_2tb/maked/audio`. Plik `uv.toml` w katalogu projektu
+działa tylko dla poleceń uv uruchamianych z tego katalogu i nie jest w repo (ścieżka jest specyficzna dla riga):
+
+```bash
+mkdir -p /media/nvme_2tb/maked/audio/uv-cache
+echo 'cache-dir = "/media/nvme_2tb/maked/audio/uv-cache"' > uv.toml
+uv cache dir    # ma wypisać /media/nvme_2tb/maked/audio/uv-cache
+```
+
+Polecenia `uv` uruchamiać z katalogu projektu — z innego miejsca uv wróci do `~/.cache/uv`.
+
+Poza pamięcią podręczną na dysk, na którym leży projekt, trafia jeszcze samo środowisko `.venv` (kilka GB;
+przy pamięci podręcznej na innym dysku uv kopiuje pliki zamiast je linkować i wypisuje o tym ostrzeżenie —
+to nie błąd) oraz model w `~/.cache/huggingface` (ok. 5 GB). Jeśli i na to brakuje miejsca: sklonować
+projekt na `/media/nvme_2tb/maked/audio`, a przed krokiem 3 ustawić
+`export HF_HOME=/media/nvme_2tb/maked/audio/hf` (ta sama zmienna musi być ustawiona przy każdej syntezie).
+
+```bash
 uv venv --python 3.12 .venv
 source .venv/bin/activate
 ```
