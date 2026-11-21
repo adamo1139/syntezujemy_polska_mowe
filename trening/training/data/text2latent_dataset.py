@@ -156,7 +156,9 @@ class Text2LatentDataset(Dataset):
 
         if self.max_wav_len is not None:
             print(f"[Dataset] Filtering audio > {self.max_wav_len} samples...")
-            mask_wav = self.df.apply(self._is_duration_ok, axis=1)
+            durs = self.df.apply(self._duration_sec, axis=1)
+            self.df['dur_sec'] = durs   # do kubełków po długości (BucketBatchSampler)
+            mask_wav = durs * self.sample_rate <= self.max_wav_len
             self.df = self.df[mask_wav].reset_index(drop=True)
 
         # --- 4. Speaker ID & Strict WER Filter ---
@@ -243,6 +245,20 @@ class Text2LatentDataset(Dataset):
         if os.path.isabs(wav_name):
             return wav_name
         return os.path.join(self.wavs_dir, wav_name)
+
+    def _duration_sec(self, row):
+        """Długość klipu w sekundach z nagłówka pliku; 0.0, gdy pliku nie da się odczytać (jak _is_duration_ok: zostaje)."""
+        try:
+            info = sf.info(self._resolve_path(row['wav_path']))
+            return info.frames / info.samplerate if info.samplerate else 0.0
+        except Exception:
+            return 0.0
+
+    def durations(self) -> list[float]:
+        """Długości wszystkich klipów w sekundach (liczone przy filtrowaniu, inaczej teraz)."""
+        if 'dur_sec' not in self.df.columns:
+            self.df['dur_sec'] = self.df.apply(self._duration_sec, axis=1)
+        return self.df['dur_sec'].astype(float).tolist()
 
     def _is_duration_ok(self, row):
         try:

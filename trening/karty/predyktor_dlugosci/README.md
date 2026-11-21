@@ -9,7 +9,7 @@ datasets:
 - HoldForQuake/VoxCPM2-pol-one-voice-367h
 ---
 
-# MikolAI: predyktor długości wypowiedzi dla polskiego TTS, jeden głos
+# MikołAI: predyktor długości wypowiedzi dla polskiego TTS, jeden głos
 
 Mały model (ok. 0,5M parametrów) z architektury [BlueTTS](https://github.com/maxmelichov/BlueTTS) (schemat
 Supertonic). Z tekstu (surowe znaki, z wielkimi literami) i krótkiego wycinka latentów głosu przewiduje

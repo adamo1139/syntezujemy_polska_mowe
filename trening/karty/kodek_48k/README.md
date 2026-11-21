@@ -12,7 +12,7 @@ datasets:
 - HoldForQuake/VoxCPM2-pol-one-voice-367h
 ---
 
-# MikolAI: kodek mowy 48 kHz (autoenkoder) dla polskiego TTS, jeden głos
+# MikołAI: kodek mowy 48 kHz (autoenkoder) dla polskiego TTS, jeden głos
 
 Autoenkoder mowy w architekturze [blue-codec](https://github.com/maxmelichov/blue-codec) (schemat Supertonic),
 wytrenowany od zera na 48 kHz. Zamienia dźwięk na latent 24 liczb na 512 próbek (93,75 klatki/s) i z powrotem.

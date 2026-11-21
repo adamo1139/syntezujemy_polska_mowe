@@ -69,7 +69,10 @@
       "lr": 0.0005,
       "lr_schedule": "constant",
       "warmup_steps": 5000,
-      "latest_every": 1000
+      "latest_every": 1000,
+      "amp": "bf16",
+      "batch_seconds": 160,
+      "max_batch": 64
     },
     "rsf": {
       "enabled": true,

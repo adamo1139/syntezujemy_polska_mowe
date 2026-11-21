@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import os
+import random
 from collections import Counter
 from typing import Optional
 
@@ -122,6 +123,51 @@ def all_reduce_grads(params) -> None:
     for p in params:
         if p.grad is not None:
             dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+
+
+class BucketBatchSampler:
+    """Partie z klipów podobnej długości, o stałym budżecie łącznej (dopełnionej) długości.
+
+    Co epokę: losowa kolejność klipów, podział na grupy po `group` klipów, w każdej grupie sortowanie po długości
+    i składanie partii tak, by liczba_klipów × najdłuższy_klip <= budget_sec (najwyżej max_batch klipów). Potem
+    losowa kolejność partii i podział między karty. Każda karta dostaje tę samą liczbę partii (ta sama lista
+    na każdej karcie, nadmiar odcięty), więc kroki na kartach zgadzają się co do sztuki.
+    """
+
+    def __init__(self, durations, budget_sec, max_batch=64, num_replicas=1, rank=0, seed=0, group=2000):
+        self.d = [max(float(x), 0.1) for x in durations]
+        self.budget, self.max_batch = float(budget_sec), int(max_batch)
+        self.num_replicas, self.rank, self.seed, self.group = num_replicas, rank, seed, group
+        self.epoch = 0
+        self._len = len(self._batches())
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def _batches(self):
+        g = random.Random(self.seed + self.epoch)
+        idx = list(range(len(self.d)))
+        g.shuffle(idx)
+        batches = []
+        for i in range(0, len(idx), self.group):
+            chunk = sorted(idx[i:i + self.group], key=lambda j: self.d[j])
+            cur, longest = [], 0.0
+            for j in chunk:
+                nxt = max(longest, self.d[j])
+                if cur and (len(cur) >= self.max_batch or (len(cur) + 1) * nxt > self.budget):
+                    batches.append(cur); cur, nxt = [], self.d[j]
+                cur.append(j); longest = nxt
+            if cur:
+                batches.append(cur)
+        g.shuffle(batches)
+        per_rank = len(batches) // self.num_replicas
+        return batches[self.rank::self.num_replicas][:per_rank]
+
+    def __iter__(self):
+        return iter(self._batches())
+
+    def __len__(self):
+        return self._len
 
 
 @torch.no_grad()

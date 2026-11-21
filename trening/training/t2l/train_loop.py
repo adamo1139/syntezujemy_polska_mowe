@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import glob
 import json
+import contextlib
 import functools
 import numpy as np
 import soundfile as sf
@@ -32,6 +33,7 @@ from training.t2l.cfg_utils import (
     average_weights,
     adamw_groups,
     build_constant_scheduler,
+    BucketBatchSampler,
     build_lr_scheduler,
     ddp_state_dict,
     seed_worker,
@@ -132,6 +134,7 @@ def train(
     inference_ref_wav: Optional[str] = None,
     dp_checkpoint: str = "checkpoints/duration_predictor/duration_predictor_final.pt",
     avg_every: int = 0,
+    batch_seconds: Optional[float] = None,
 ):
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")   # gloo: próby na CPU
@@ -204,6 +207,12 @@ def train(
     if "lr" in train_cfg and not finetune: lr = float(train_cfg["lr"])
     save_every = int(train_cfg.get("save_every", 1000))            # kroki między punktami kontrolnymi (i próbkami)
     latest_every = int(train_cfg.get("latest_every", 0))           # ckpt_latest.pt (nadpisywany, do wznawiania); 0 = wyłączony
+    # Mieszana precyzja: "bf16" = autocast bfloat16 dla enkoderów tekstu/wzorca i pola wektorowego (strata w float32)
+    amp_dtype = {"bf16": torch.bfloat16, "none": None}[str(train_cfg.get("amp", "none"))]
+    # Partie po długości: budżet łącznej dopełnionej długości na kartę (s, przed powtórzeniem Ke); 0 = stała partia
+    if batch_seconds is None:
+        batch_seconds = float(train_cfg.get("batch_seconds", 0))
+    max_batch = int(train_cfg.get("max_batch", 64))
     keep_checkpoints = int(train_cfg.get("keep_checkpoints", 0))   # 0 = trzymaj wszystkie
     lr_milestones = [int(m) for m in train_cfg.get("lr_milestones", [300_000, 600_000])]
     ema_decay = float(train_cfg.get("ema_decay", 0.0))  # 0 = no EMA
@@ -470,10 +479,19 @@ def train(
         weights = torch.from_numpy(sample_weights).double()
         sampler = WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True)
     
+    if batch_seconds and batch_seconds > 0:
+        sampler = BucketBatchSampler(dataset.durations(), batch_seconds, max_batch=max_batch,
+                                     num_replicas=dist.get_world_size() if dist.is_initialized() else 1, rank=rank,
+                                     seed=1234)
+        if rank == 0:
+            print(f"[kubełki] budżet {batch_seconds:g} s na kartę (x Ke={Ke}), najwyżej {max_batch} klipów; "
+                  f"{len(sampler)} partii na epokę na kartę")
+        loader_batching = dict(batch_sampler=sampler)
+    else:
+        loader_batching = dict(batch_size=batch_size, sampler=sampler)
     dataloader = DataLoader(
         dataset, 
-        batch_size=batch_size, 
-        sampler=sampler, 
+        **loader_batching,
         num_workers=4, 
         collate_fn=collate_text2latent,
         pin_memory=True,
@@ -629,7 +647,9 @@ def train(
                 chunk_compress_factor=chunk_compress_factor
             )
 
-            ref_values = reference_encoder(z_ref, mask=ref_enc_mask)
+            amp_ctx = (lambda: torch.autocast(device_type=device.type, dtype=amp_dtype)) if amp_dtype else contextlib.nullcontext
+            with amp_ctx():
+                ref_values = reference_encoder(z_ref, mask=ref_enc_mask)
 
             if global_step % 1000 == 0:
                 with torch.no_grad():
@@ -643,31 +663,33 @@ def train(
                             f"WARNING: ReferenceEncoder is sensitive to padded values! Max Diff: {diff}"
                         )
 
-            h_text = text_encoder(text_ids, ref_values, text_mask=text_masks)
+            with amp_ctx():
+                h_text = text_encoder(text_ids, ref_values, text_mask=text_masks)
             
             # (latent_mask already computed above; z_1 masked)
             T_txt = h_text.shape[2]
 
-            spfm_out = spfm_forward_mask(
-                global_step=global_step,
-                max_steps=max_steps,
-                spfm_start_override=spfm_start_override,
-                z_1=z_1,
-                h_text=h_text,
-                ref_values=ref_values,
-                latent_mask=latent_mask,
-                target_loss_mask=target_loss_mask,
-                text_masks=text_masks,
-                valid_z_len=valid_z_len,
-                vf_estimator=vf_estimator,
-                u_text=u_text,
-                u_ref=u_ref,
-                sigma_min=sigma_min,
-                device=device,
-                B=B,
-                rank=rank,
-                u_key=u_key,
-            )
+            with amp_ctx():
+              spfm_out = spfm_forward_mask(
+                  global_step=global_step,
+                  max_steps=max_steps,
+                  spfm_start_override=spfm_start_override,
+                  z_1=z_1,
+                  h_text=h_text,
+                  ref_values=ref_values,
+                  latent_mask=latent_mask,
+                  target_loss_mask=target_loss_mask,
+                  text_masks=text_masks,
+                  valid_z_len=valid_z_len,
+                  vf_estimator=vf_estimator,
+                  u_text=u_text,
+                  u_ref=u_ref,
+                  sigma_min=sigma_min,
+                  device=device,
+                  B=B,
+                  rank=rank,
+                  u_key=u_key,
+              )
             spfm_mask = spfm_out.spfm_mask
             if spfm_out.ran_spfm:
                 spfm_dirty_total += spfm_out.dirty_count
@@ -724,15 +746,17 @@ def train(
                 style_keys_final = torch.where(mask_style_uncond > 0.5, u_key.expand(B_eff, -1, -1), tile)
 
             x_t_in = x_t * latent_mask_exp
-            v_pred = vf_estimator(
-                noisy_latent=x_t_in,
-                text_emb=h_context,
-                style_ttl=ref_values_final,
-                latent_mask=latent_mask_exp,
-                text_mask=text_mask_final,
-                current_step=t,
-                style_keys=style_keys_final,
-            )
+            with amp_ctx():
+                v_pred = vf_estimator(
+                    noisy_latent=x_t_in,
+                    text_emb=h_context,
+                    style_ttl=ref_values_final,
+                    latent_mask=latent_mask_exp,
+                    text_mask=text_mask_final,
+                    current_step=t,
+                    style_keys=style_keys_final,
+                )
+            v_pred = v_pred.float()   # strata i porównania w float32
 
             final_mask = latent_mask_exp * target_loss_mask_exp
             mask_ct = final_mask.expand(-1, C, -1)
