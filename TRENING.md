@@ -148,7 +148,7 @@ CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 -m training.t2l.cli
   --config ../dane/polski_100m.json --data ../dane/bluetts_train.csv \
   --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --stats_path ../modele/stats.pt \
   --dp_checkpoint ../modele/dp/duration_predictor_wsm.pt --out ../modele/t2l \
-  --max_steps 100000 --avg_every 20 --inference_ref_wav ../glosy/poziomka_dluga.wav
+  --max_steps 100000 --avg_every 50 --inference_ref_wav ../glosy/poziomka_dluga.wav
 ```
 
 - **Wznowienie:** to samo polecenie; trener sam bierze najnowszy punkt z `--out`: `ckpt_step_*.pt` (co 5000

@@ -216,6 +216,9 @@ def train(
     latest_every = int(train_cfg.get("latest_every", 0))           # ckpt_latest.pt (nadpisywany, do wznawiania); 0 = wyłączony
     # Mieszana precyzja: "bf16" = autocast bfloat16 dla enkoderów tekstu/wzorca i pola wektorowego (strata w float32)
     amp_dtype = {"bf16": torch.bfloat16, "none": None}[str(train_cfg.get("amp", "none"))]
+    # set_seed() włącza deterministyczne sploty cuDNN, a te mają wolne przejście wstecz (zwłaszcza sploty
+    # wgłębne z dylatacją). Domyślnie wyłączone; true przywraca zachowanie oryginału (powtarzalność co do bitu).
+    torch.backends.cudnn.deterministic = bool(train_cfg.get("cudnn_deterministic", False))
     # Partie po długości: budżet łącznej dopełnionej długości na kartę (s, przed powtórzeniem Ke); 0 = stała partia
     if batch_seconds is None:
         batch_seconds = float(train_cfg.get("batch_seconds", 0))
@@ -333,7 +336,7 @@ def train(
     # each parameter once: the projected style key is shared by the text encoder and the VF
     params = list({id(p): p for m in (text_encoder, reference_encoder, vf_estimator, uncond_params)
                    for p in m.parameters()}.values())
-    optimizer = AdamW(adamw_groups(params, weight_decay, uncond_tokens), lr=lr)
+    optimizer = AdamW(adamw_groups(params, weight_decay, uncond_tokens), lr=lr, fused=device.type == "cuda")
 
     global_step = 0
     scheduler_state = None
@@ -381,7 +384,7 @@ def train(
             if u_key is not None:
                 u_key.data.copy_(checkpoint['u_key'])
 
-        optimizer = AdamW(adamw_groups(params, weight_decay, uncond_tokens), lr=lr)
+        optimizer = AdamW(adamw_groups(params, weight_decay, uncond_tokens), lr=lr, fused=device.type == "cuda")
         if 'optimizer' in checkpoint and not (finetune or shapes_changed):
             try:
                 optimizer.load_state_dict(checkpoint['optimizer'])
