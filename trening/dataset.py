@@ -71,7 +71,18 @@ class TTSDataset(Dataset):
 
     def __getitem__(self, idx):
         try:
-            wav, sr = sf.read(self.files[idx], dtype="float32", always_2d=True)   # [T, C]
+            with sf.SoundFile(self.files[idx]) as f:
+                sr, n = f.samplerate, f.frames
+                if self.segment_size is not None and sr == self.sample_rate and n > self.segment_size:
+                    # Czytamy z pliku tylko wycinek zamiast dekodować cały klip, żeby wyciąć z niego 1,4 s:
+                    # przy klipach średnio 9 s to kilka razy mniej pracy procesora na próbkę.
+                    max_start = n - self.segment_size
+                    at_end = self.end_crop_prob > 0 and random.random() < self.end_crop_prob
+                    start = max_start if at_end else random.randint(0, max_start)
+                    f.seek(start)
+                    wav = f.read(self.segment_size, dtype="float32", always_2d=True)   # [segment, C]
+                    return torch.from_numpy(wav).mean(dim=1)
+                wav = f.read(dtype="float32", always_2d=True)                          # [T, C]
         except Exception as e:
             print(f"skipping unreadable file {self.files[idx]}: {e}")
             return self[random.randrange(len(self))]

@@ -52,6 +52,10 @@ python -c "import torch; print(torch.__version__, torch.cuda.device_count())"
 
 Wszystkie polecenia poniżej uruchamia się z katalogu `trening/`, z aktywnym tym środowiskiem.
 
+**Trening na wielu kartach na rigu wymaga zmiennych NCCL:** `NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1
+NCCL_CUMEM_HOST_ENABLE=0`. Bez nich start kończy się błędem `NCCL error ... Error while attaching to shared
+memory segment /dev/shm/nccl-...`. Polecenia z `torchrun --nproc_per_node=6` poniżej już je zawierają.
+
 ## 2. Kodek 48 kHz
 
 Konfiguracja: sekcja `ae` w `dane/polski_100m.json`. Względem oryginału zmienione jest tylko próbkowanie
@@ -74,6 +78,7 @@ rm -rf ../modele/kodek_48k_proba
 Pełny trening na 6 kartach:
 
 ```bash
+NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1 NCCL_CUMEM_HOST_ENABLE=0 \
 CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 train_autoencoder.py \
   --arch_config ../dane/polski_100m.json --checkpoint_dir ../modele/kodek_48k \
   --total_steps 100000 --eval_input ../glosy/poziomka_dluga.wav --eval_every 2000
@@ -116,6 +121,7 @@ python -m training.dp.cli --config ../dane/polski_100m.json --data ../dane/bluet
 ## 5. Model tekst → latenty (ok. 75M)
 
 ```bash
+NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1 NCCL_CUMEM_HOST_ENABLE=0 \
 CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 -m training.t2l.cli \
   --config ../dane/polski_100m.json --data ../dane/bluetts_train.csv \
   --ae_checkpoint ../modele/kodek_48k/ae_latest.pt --stats_path ../modele/stats.pt \
