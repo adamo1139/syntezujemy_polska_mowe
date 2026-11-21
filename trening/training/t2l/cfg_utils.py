@@ -202,9 +202,16 @@ def ddp_state_dict(module: nn.Module) -> dict:
 
 
 def _latest_ckpt_in_dir(directory: str) -> Optional[str]:
-    """Path to latest ``ckpt_step_*.pt`` in ``directory``, or None."""
+    """Najnowszy punkt w ``directory``: ``ckpt_step_*.pt`` albo ``ckpt_latest.pt`` (gdy jego krok, zapisany obok
+    w ``ckpt_latest.step``, jest późniejszy). None, gdy nie ma żadnego."""
     ckpts = glob.glob(os.path.join(directory, "ckpt_step_*.pt"))
-    if not ckpts:
-        return None
     ckpts.sort(key=lambda x: int(x.split("_")[-1].split(".")[0]))
-    return ckpts[-1]
+    best, best_step = (ckpts[-1], int(ckpts[-1].split("_")[-1].split(".")[0])) if ckpts else (None, -1)
+    latest = os.path.join(directory, "ckpt_latest.pt")
+    try:
+        latest_step = int(open(os.path.join(directory, "ckpt_latest.step")).read().strip())
+    except (OSError, ValueError):
+        latest_step = -1
+    if os.path.isfile(latest) and latest_step > best_step:
+        return latest
+    return best

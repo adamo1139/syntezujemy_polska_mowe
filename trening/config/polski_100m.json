@@ -68,7 +68,8 @@
       "keep_checkpoints": 6,
       "lr": 0.0005,
       "lr_schedule": "constant",
-      "warmup_steps": 5000
+      "warmup_steps": 5000,
+      "latest_every": 1000
     },
     "rsf": {
       "enabled": true,

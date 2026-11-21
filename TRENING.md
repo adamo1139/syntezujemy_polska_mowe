@@ -151,7 +151,9 @@ CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 -m training.t2l.cli
   --batch_size 14 --max_steps 1000000 --avg_every 20 --inference_ref_wav ../glosy/poziomka_dluga.wav
 ```
 
-- **Wznowienie:** to samo polecenie; trener sam bierze najnowszy punkt kontrolny z `--out`.
+- **Wznowienie:** to samo polecenie; trener sam bierze najnowszy punkt z `--out`: `ckpt_step_*.pt` (co 5000
+  kroków, z próbkami) albo `ckpt_latest.pt` (nadpisywany co 1000 kroków, `ttl.train.latest_every`), jeśli jest
+  nowszy. Przerwanie kosztuje więc najwyżej 1000 kroków.
 - **`--avg_every 20`:** bez DDP; każda karta trenuje własną kopię, a co 20 kroków kopie są uśredniane (jak przy
   kodeku, bo DDP dławi się na PCIe riga). EMA jest wtedy aktualizowana tylko po uśrednieniu, z odpowiednio
   mniejszym współczynnikiem, więc obejmuje to samo okno czasowe.

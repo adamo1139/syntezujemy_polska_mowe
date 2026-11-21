@@ -203,6 +203,7 @@ def train(
     warmup_steps = int(train_cfg.get("warmup_steps", 0))
     if "lr" in train_cfg and not finetune: lr = float(train_cfg["lr"])
     save_every = int(train_cfg.get("save_every", 1000))            # kroki między punktami kontrolnymi (i próbkami)
+    latest_every = int(train_cfg.get("latest_every", 0))           # ckpt_latest.pt (nadpisywany, do wznawiania); 0 = wyłączony
     keep_checkpoints = int(train_cfg.get("keep_checkpoints", 0))   # 0 = trzymaj wszystkie
     lr_milestones = [int(m) for m in train_cfg.get("lr_milestones", [300_000, 600_000])]
     ema_decay = float(train_cfg.get("ema_decay", 0.0))  # 0 = no EMA
@@ -534,6 +535,7 @@ def train(
     epoch = 0
     epoch_base = global_step  # offsets set_epoch so a resume does not replay the epoch-0 draw order
     last_saved_step = global_step  # the checkpoint we resumed from (or step 0) is not written again
+    last_latest_step = global_step
 
     while global_step < max_steps:
         if hasattr(sampler, 'set_epoch'): sampler.set_epoch(epoch_base + epoch)
@@ -799,6 +801,33 @@ def train(
             progress_bar.set_postfix(**postfix)
 
             # under accumulation global_step stays on a multiple of 1000 for several micro-batches: save once
+            # ckpt_latest.pt: ten sam stan co zwykły punkt kontrolny, nadpisywany co latest_every kroków (bez próbek
+            # i bez kopii EMA). Zapis przez plik tymczasowy, więc przerwanie w trakcie nie psuje poprzedniej wersji.
+            if (latest_every > 0 and global_step % latest_every == 0 and global_step % save_every != 0
+                    and global_step != last_latest_step and rank == 0):
+                last_latest_step = global_step
+                _ckpt = {
+                    "vf_estimator": ddp_state_dict(vf_estimator),
+                    "text_encoder": ddp_state_dict(text_encoder),
+                    "reference_encoder": ddp_state_dict(reference_encoder),
+                    "u_text": u_text.data,
+                    "u_ref": u_ref.data,
+                    **({"u_key": u_key.data} if u_key is not None else {}),
+                    "optimizer": optimizer.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "global_step": global_step,
+                }
+                if ema is not None:
+                    _ckpt["ema"] = ema.state_dicts()
+                _path = os.path.join(checkpoint_dir, "ckpt_latest.pt")
+                torch.save(_ckpt, _path + ".tmp")
+                os.replace(_path + ".tmp", _path)
+                with open(os.path.join(checkpoint_dir, "ckpt_latest.step.tmp"), "w") as _f:
+                    _f.write(str(global_step))
+                os.replace(os.path.join(checkpoint_dir, "ckpt_latest.step.tmp"), os.path.join(checkpoint_dir, "ckpt_latest.step"))
+                del _ckpt
+                print(f"Saved ckpt_latest.pt (step {global_step})")
+
             if global_step % save_every == 0 and global_step != last_saved_step and rank == 0:
                 last_saved_step = global_step
                 ckpt_path = os.path.join(checkpoint_dir, f"ckpt_step_{global_step}.pt")
