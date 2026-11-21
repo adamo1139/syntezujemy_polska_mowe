@@ -3,6 +3,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils import weight_norm, spectral_norm
 
+def _real_and_fake(discriminators, y, y_hat):
+    """Wyniki i mapy cech każdego dyskryminatora dla nagrań prawdziwych (y) i wygenerowanych (y_hat).
+
+    Gdy oba mają ten sam kształt (tak jest w treningu: te same wycinki), idą przez dyskryminator jednym
+    wywołaniem jako sklejona partia i są potem rozdzielane. Dyskryminatory nie mają warstw zależnych od
+    partii, więc wynik jest ten sam co z dwóch osobnych wywołań, a liczba wywołań (główny koszt przy małych
+    partiach) spada o połowę. Jedyna różnica: normalizacja spektralna (MRD) robi wtedy jedną iterację
+    potęgową na krok zamiast dwóch.
+    """
+    y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
+    together = y.shape == y_hat.shape
+    b = y.shape[0]
+    x = torch.cat([y, y_hat], dim=0) if together else None
+    for d in discriminators:
+        if together:
+            out, fmap = d(x)
+            y_d_r, y_d_g = out[:b], out[b:]
+            fmap_r, fmap_g = [f[:b] for f in fmap], [f[b:] for f in fmap]
+        else:
+            y_d_r, fmap_r = d(y)
+            y_d_g, fmap_g = d(y_hat)
+        y_d_rs.append(y_d_r); y_d_gs.append(y_d_g)
+        fmap_rs.append(fmap_r); fmap_gs.append(fmap_g)
+    return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+
+
 class DiscriminatorP(nn.Module):
     def __init__(self, period, kernel_size=5, stride=3, use_spectral_norm=False):
         super(DiscriminatorP, self).__init__()
@@ -50,13 +76,7 @@ class MultiPeriodDiscriminator(nn.Module):
         self.discriminators = nn.ModuleList([DiscriminatorP(p) for p in periods])
 
     def forward(self, y, y_hat):
-        y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
-        for d in self.discriminators:
-            y_d_r, fmap_r = d(y)
-            y_d_g, fmap_g = d(y_hat)
-            y_d_rs.append(y_d_r); y_d_gs.append(y_d_g)
-            fmap_rs.append(fmap_r); fmap_gs.append(fmap_g)
-        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+        return _real_and_fake(self.discriminators, y, y_hat)
 
 class DiscriminatorR(nn.Module):
     def __init__(self, resolution, use_spectral_norm=False):
@@ -132,10 +152,4 @@ class MultiResolutionDiscriminator(nn.Module):
         self.discriminators = nn.ModuleList([DiscriminatorR(r, use_spectral_norm=True) for r in resolutions])
 
     def forward(self, y, y_hat):
-        y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
-        for d in self.discriminators:
-            y_d_r, fmap_r = d(y)
-            y_d_g, fmap_g = d(y_hat)
-            y_d_rs.append(y_d_r); y_d_gs.append(y_d_g)
-            fmap_rs.append(fmap_r); fmap_gs.append(fmap_g)
-        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+        return _real_and_fake(self.discriminators, y, y_hat)

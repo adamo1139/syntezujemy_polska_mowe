@@ -244,6 +244,13 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
     L_recon = recon_l1(rec_real, rec_fake, mel_transforms_loss)
     if prof: prof.mark("strata rekonstrukcji (mel)")
 
+    # W kroku generatora wagi dyskryminatorów są tylko używane, nie uczone: bez tego przejście wstecz liczyłoby
+    # też ich gradienty, które i tak są zerowane przed następnym krokiem dyskryminatora. Gradient generatora
+    # jest identyczny. Pod DDP zostaje po staremu (reduktor DDP oczekuje gradientów wszystkich wag).
+    freeze_d = not recon_only and not isinstance(mpd, DDP) and not isinstance(mrd, DDP)
+    if freeze_d:
+        d_params = [p for m in (mpd, mrd) for p in m.parameters() if p.requires_grad]
+        for p in d_params: p.requires_grad_(False)
     if not recon_only:
         y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(audio_crop, y_hat_crop)
         y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = mrd(audio_crop, y_hat_crop)
@@ -257,9 +264,14 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
     for w, loss in extras.values(): loss_g_total = loss_g_total + w * loss
     if prof: prof.mark("generator: dyskryminatory w przód + straty")
     
-    if check_for_nan_inf(loss_g_total, "Generator Loss", logger): return None
+    if check_for_nan_inf(loss_g_total, "Generator Loss", logger):
+        if freeze_d:
+            for p in d_params: p.requires_grad_(True)
+        return None
     opt_g.zero_grad()
     loss_g_total.backward()
+    if freeze_d:
+        for p in d_params: p.requires_grad_(True)
     if prof: prof.mark("generator: wstecz")
     if clip_generator:
         torch.nn.utils.clip_grad_norm_(encoder.parameters(), 5.0)

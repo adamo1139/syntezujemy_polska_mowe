@@ -31,3 +31,6 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **Kodek**: próbka odsłuchowa wczytywana przez `soundfile` (bez `torchcodec` i `ffmpeg`).
 - **Kodek**: `--eval_every` (próbki niezależnie od punktów kontrolnych), wczytywanie samego wycinka z pliku
   zamiast całego klipu, `--avg_every` (okresowe uśrednianie wag między kartami zamiast DDP).
+- **Kodek**: nagranie prawdziwe i wygenerowane przechodzą przez każdy dyskryminator jednym wywołaniem; w kroku
+  generatora wagi dyskryminatorów są zamrożone (poza DDP); `--profile`, `--num_workers`; próbka odsłuchowa
+  obcinana do długości nagrania.
