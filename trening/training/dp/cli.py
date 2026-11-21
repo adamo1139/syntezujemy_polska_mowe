@@ -6,6 +6,9 @@ from training.utils import seed_all
 
 def main():
     seed_all(42, deterministic=False)
+    # Bez autostrojenia cuDNN: klipy mają w każdej partii inną długość, a benchmark=True stroi sploty od nowa
+    # dla każdego nowego kształtu (sekundy na krok). Trener modelu tekst->latenty też ma je wyłączone.
+    torch.backends.cudnn.benchmark = False
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/tts.json")
     parser.add_argument("--data", type=str, default="generated_audio/combined_dataset_cleaned.csv")
