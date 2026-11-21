@@ -54,3 +54,5 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
   (`BucketBatchSampler`, `ttl.train.batch_seconds`, `--batch_seconds`); zbiór danych zapamiętuje długości klipów.
 - **Model tekst→latenty**: `--profile`, `--num_workers`, początek SPFM z konfiguracji (`ttl.train.spfm_start`).
 - **Model tekst→latenty**: niedeterministyczne sploty cuDNN domyślnie (`ttl.train.cudnn_deterministic`), AdamW fused na GPU.
+- **`policz_latenty.py`** (nasz) i `--latents`: latenty kodeka liczone raz i czytane z dysku zamiast enkodera w każdym
+  kroku; zbiór danych zwraca wtedy latenty `[144, T]`, a collate obsługuje audio i latenty.

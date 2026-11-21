@@ -142,13 +142,25 @@ python usrednij_dp.py --punkty ../modele/dp/duration_predictor_{4500,5000,5500,6
 
 ## 5. Model tekst → latenty (ok. 75M)
 
+Najpierw latenty kodeka dla wszystkich klipów, raz (ok. 6 GB w float16 w `dane/latenty/`):
+
+```bash
+python policz_latenty.py --metadata ../dane/bluetts_train.csv ../dane/bluetts_val.csv \
+  --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --wyjscie ../dane/latenty --device cuda:1
+```
+
+Każdy klip jest kodowany dopełniony tylko do swojej wielokrotności 3072 próbek, czyli tak jak w inferencji
+(liczenie w trenerze dopełniało do najdłuższego klipu w partii, co zmieniało ostatnie klatki krótszych klipów).
+Trener z `--latents ../dane/latenty` nie przepuszcza już audio przez enkoder kodeka w każdym kroku (było ok. 19%
+czasu kroku) i odmówi startu, jeśli latenty pochodzą z innego enkodera niż `--ae_checkpoint`.
+
 ```bash
 NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1 NCCL_CUMEM_HOST_ENABLE=0 \
 CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 -m training.t2l.cli \
   --config ../dane/polski_100m.json --data ../dane/bluetts_train.csv \
   --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --stats_path ../modele/stats.pt \
   --dp_checkpoint ../modele/dp/duration_predictor_wsm.pt --out ../modele/t2l \
-  --max_steps 100000 --avg_every 50 --inference_ref_wav ../glosy/poziomka_dluga.wav
+  --max_steps 100000 --avg_every 50 --latents ../dane/latenty --inference_ref_wav ../glosy/poziomka_dluga.wav
 ```
 
 - **Wznowienie:** to samo polecenie; trener sam bierze najnowszy punkt z `--out`: `ckpt_step_*.pt` (co 5000

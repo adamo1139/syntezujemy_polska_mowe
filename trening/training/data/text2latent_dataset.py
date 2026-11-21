@@ -3,6 +3,7 @@ from torch.utils.data import Dataset
 import soundfile as sf
 import pandas as pd
 import os
+import json
 import numpy as np
 import torchaudio
 import torch.nn.functional as F
@@ -45,6 +46,7 @@ class Text2LatentDataset(Dataset):
         affricate_ligatures: bool = False,  # fold t͡s/tʃ/dʒ/dz into ʦ/ʧ/ʤ/ʣ (config key)
         lang_tags: bool = False,          # '<lang>' + ids + '</lang>' (config key)
         load_ref: bool = True,            # False: bez drugiego klipu jako wzorca (zwracany jest ten sam klip)
+        latents_dir: str | None = None,   # katalog z policz_latenty.py: zwracane są latenty [144, T] zamiast audio
     ):
         self.sample_rate = sample_rate
         self.hop_length = hop_length
@@ -53,6 +55,12 @@ class Text2LatentDataset(Dataset):
         self.default_lang = default_lang
         self.lang_tags = lang_tags
         self.load_ref = load_ref
+        self.latents_dir = latents_dir
+        self._lat_mm = None
+        if latents_dir:
+            with open(os.path.join(latents_dir, "indeks.json"), encoding="utf-8") as f:
+                self.lat_meta = json.load(f)
+            self.lat_index = self.lat_meta["klipy"]
 
         # --- 1. Load Metadata ---
         if not os.path.exists(metadata_path):
@@ -154,7 +162,17 @@ class Text2LatentDataset(Dataset):
             mask = self.df['text'].astype(str).str.len() <= self.max_text_len
             self.df = self.df[mask].reset_index(drop=True)
 
-        if self.max_wav_len is not None:
+        if self.latents_dir:
+            # długości z indeksu latentów zamiast odczytu nagłówków plików; klipy spoza indeksu są pomijane
+            klucze = self.df['wav_path'].map(lambda w: self._resolve_path(w))
+            w_indeksie = klucze.isin(set(self.lat_index))
+            if (~w_indeksie).any():
+                print(f"[Dataset] {int((~w_indeksie).sum())} klipów nie ma w {latents_dir}/indeks.json — pomijam")
+            self.df = self.df[w_indeksie].reset_index(drop=True)
+            self.df['dur_sec'] = self.df['wav_path'].map(lambda w: float(self.lat_index[self._resolve_path(w)][2]))
+            if self.max_wav_len is not None:
+                self.df = self.df[self.df['dur_sec'] * self.sample_rate <= self.max_wav_len].reset_index(drop=True)
+        elif self.max_wav_len is not None:
             print(f"[Dataset] Filtering audio > {self.max_wav_len} samples...")
             durs = self.df.apply(self._duration_sec, axis=1)
             self.df['dur_sec'] = durs   # do kubełków po długości (BucketBatchSampler)
@@ -273,7 +291,16 @@ class Text2LatentDataset(Dataset):
     def _assign_speaker_ids(self):
         self.df['speaker_id'] = self.df['speaker_id'].astype(int)
 
+    def _load_latent_by_index(self, idx):
+        """Latenty klipu [144, T] (float32, nieznormalizowane) z pliku policz_latenty.py."""
+        if self._lat_mm is None:   # otwierane leniwie, osobno w każdym procesie wczytującym
+            self._lat_mm = np.load(os.path.join(self.latents_dir, "latenty.npy"), mmap_mode="r")
+        off, n, _ = self.lat_index[self._resolve_path(self.df.iloc[idx]['wav_path'])]
+        return torch.from_numpy(np.asarray(self._lat_mm[off:off + n], dtype=np.float32).T.copy())
+
     def _load_wav_by_index(self, idx):
+        if self.latents_dir:
+            return self._load_latent_by_index(idx)
         row = self.df.iloc[idx]
         wav_path = self._resolve_path(row['wav_path'])
 
@@ -369,27 +396,32 @@ def collate_text2latent(batch):
     wavs, texts, spk_ids, ref_wavs, is_self, ref_spk_ids = zip(*batch)
 
     # 1. Pad Target Wavs
-    max_wav = max(w.shape[0] for w in wavs)
+    # audio [T] albo (z latents_dir) latenty [C, T]; długości w próbkach albo w klatkach
+    max_wav = max(w.shape[-1] for w in wavs)
     wavs_padded = []
     wav_lens = []
     for w in wavs:
-        pad = max_wav - w.shape[0]
+        pad = max_wav - w.shape[-1]
         wavs_padded.append(F.pad(w, (0, pad)))
-        wav_lens.append(w.shape[0])
+        wav_lens.append(w.shape[-1])
     
-    wavs_padded = torch.stack(wavs_padded).unsqueeze(1) # [B, 1, T]
+    wavs_padded = torch.stack(wavs_padded)
+    if wavs_padded.dim() == 2:
+        wavs_padded = wavs_padded.unsqueeze(1) # [B, 1, T]
     wav_lens = torch.tensor(wav_lens, dtype=torch.long)
 
     # 2. Pad Reference Wavs
-    max_ref = max(w.shape[0] for w in ref_wavs)
+    max_ref = max(w.shape[-1] for w in ref_wavs)
     ref_padded = []
     ref_lens = []
     for w in ref_wavs:
-        pad = max_ref - w.shape[0]
+        pad = max_ref - w.shape[-1]
         ref_padded.append(F.pad(w, (0, pad)))
-        ref_lens.append(w.shape[0])
+        ref_lens.append(w.shape[-1])
         
-    ref_padded = torch.stack(ref_padded).unsqueeze(1) # [B, 1, T_ref]
+    ref_padded = torch.stack(ref_padded)
+    if ref_padded.dim() == 2:
+        ref_padded = ref_padded.unsqueeze(1) # [B, 1, T_ref]
     ref_lens = torch.tensor(ref_lens, dtype=torch.long)
     
     # 3. Pad Text

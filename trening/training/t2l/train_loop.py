@@ -139,6 +139,7 @@ def train(
     batch_seconds: Optional[float] = None,
     num_workers: int = 4,
     profile: int = 0,
+    latents_dir: Optional[str] = None,
 ):
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")   # gloo: próby na CPU
@@ -465,9 +466,19 @@ def train(
         max_text_len=max_text_len,
         affricate_ligatures=affricate_ligatures,
         lang_tags=lang_tags,
+        latents_dir=latents_dir,
     )
     if rank == 0:
         print(f"Dataset loaded with {len(dataset)} samples.")
+    if latents_dir:
+        # latenty muszą pochodzić z tego samego enkodera co statystyki i kodek w tym przebiegu
+        from training.utils import encoder_fingerprint
+        _fp = encoder_fingerprint(ae_encoder.state_dict())[:12]
+        if dataset.lat_meta.get("odcisk_enkodera") != _fp:
+            raise SystemExit(f"{latents_dir}: latenty z enkodera {dataset.lat_meta.get('odcisk_enkodera')}, "
+                             f"a --ae_checkpoint ma {_fp}. Policz latenty od nowa (policz_latenty.py).")
+        if rank == 0:
+            print(f"[latenty] gotowe latenty z {latents_dir} (enkoder {_fp}); kodek nie liczy ich w kroku")
 
     # Sampler Setup
     if "sample_weight" in dataset.df.columns:
@@ -527,25 +538,34 @@ def train(
         val_is_self = val_is_self[:4].to(device)
         
         with torch.no_grad():
-            val_mel = mel_spec(val_wavs.squeeze(1))
-            val_z = ae_encoder(val_mel)
-            val_z = compress_latents(val_z, factor=chunk_compress_factor)
-            val_z_1 = ((val_z - mean) / std) * normalizer_scale
+            if latents_dir:
+                val_z_1 = ((val_wavs - mean) / std) * normalizer_scale
+            else:
+                val_mel = mel_spec(val_wavs.squeeze(1))
+                val_z = ae_encoder(val_mel)
+                val_z = compress_latents(val_z, factor=chunk_compress_factor)
+                val_z_1 = ((val_z - mean) / std) * normalizer_scale
             
             B_val, C, T_val = val_z_1.shape
             
             # Use valid lengths for validation to match training
-            valid_mel_len_val = val_lengths[:4].to(device).float() / hop_length
-            valid_z_len_val = (valid_mel_len_val / chunk_compress_factor).ceil().long().clamp(min=1, max=T_val)
+            if latents_dir:
+                valid_z_len_val = val_lengths[:4].to(device).long().clamp(min=1, max=T_val)
+            else:
+                valid_mel_len_val = val_lengths[:4].to(device).float() / hop_length
+                valid_z_len_val = (valid_mel_len_val / chunk_compress_factor).ceil().long().clamp(min=1, max=T_val)
 
             # Encode Ref
-            val_mel_ref = mel_spec(val_ref_wavs.squeeze(1))
-            val_z_ref_full_enc = ae_encoder(val_mel_ref)
-            val_z_ref_full_enc = compress_latents(val_z_ref_full_enc, factor=chunk_compress_factor)
-            val_z_ref_full = ((val_z_ref_full_enc - mean) / std) * normalizer_scale
-
-            valid_mel_len_ref = val_ref_lengths[:4].to(device).float() / hop_length
-            valid_z_len_ref = (valid_mel_len_ref / chunk_compress_factor).ceil().long().clamp(min=1, max=val_z_ref_full.shape[2])
+            if latents_dir:
+                val_z_ref_full = ((val_ref_wavs - mean) / std) * normalizer_scale
+                valid_z_len_ref = val_ref_lengths[:4].to(device).long().clamp(min=1, max=val_z_ref_full.shape[2])
+            else:
+                val_mel_ref = mel_spec(val_ref_wavs.squeeze(1))
+                val_z_ref_full_enc = ae_encoder(val_mel_ref)
+                val_z_ref_full_enc = compress_latents(val_z_ref_full_enc, factor=chunk_compress_factor)
+                val_z_ref_full = ((val_z_ref_full_enc - mean) / std) * normalizer_scale
+                valid_mel_len_ref = val_ref_lengths[:4].to(device).float() / hop_length
+                valid_z_len_ref = (valid_mel_len_ref / chunk_compress_factor).ceil().long().clamp(min=1, max=val_z_ref_full.shape[2])
             
             # Use build_reference_only for correct inference behavior
             val_z_ref, val_ref_enc_mask = build_reference_only(
@@ -623,24 +643,31 @@ def train(
             B = wavs.shape[0]
 
             with torch.no_grad():
-                # zero-pad to whole hop * chunk_compress_factor chunks, the layout the AE and inference use
-                chunk = hop_length * chunk_compress_factor
-                wavs = F.pad(wavs, (0, (-wavs.shape[-1]) % chunk))
-                ref_wavs = F.pad(ref_wavs, (0, (-ref_wavs.shape[-1]) % chunk))
-                mel = mel_spec(wavs.squeeze(1))
-                z = ae_encoder(mel)
-                z = compress_latents(z, factor=chunk_compress_factor)
-                z_1 = ((z - mean) / std) * normalizer_scale
+              if latents_dir:   # gotowe latenty [B, 144, T] z policz_latenty.py; tylko normalizacja
+                z_1 = ((wavs - mean) / std) * normalizer_scale
+                z_ref_full = ((ref_wavs - mean) / std) * normalizer_scale
+              else:
+                  # zero-pad to whole hop * chunk_compress_factor chunks, the layout the AE and inference use
+                  chunk = hop_length * chunk_compress_factor
+                  wavs = F.pad(wavs, (0, (-wavs.shape[-1]) % chunk))
+                  ref_wavs = F.pad(ref_wavs, (0, (-ref_wavs.shape[-1]) % chunk))
+                  mel = mel_spec(wavs.squeeze(1))
+                  z = ae_encoder(mel)
+                  z = compress_latents(z, factor=chunk_compress_factor)
+                  z_1 = ((z - mean) / std) * normalizer_scale
 
-                mel_ref = mel_spec(ref_wavs.squeeze(1))
-                z_ref_full_enc = ae_encoder(mel_ref)
-                z_ref_full_enc = compress_latents(z_ref_full_enc, factor=chunk_compress_factor)
-                z_ref_full = ((z_ref_full_enc - mean) / std) * normalizer_scale
+                  mel_ref = mel_spec(ref_wavs.squeeze(1))
+                  z_ref_full_enc = ae_encoder(mel_ref)
+                  z_ref_full_enc = compress_latents(z_ref_full_enc, factor=chunk_compress_factor)
+                  z_ref_full = ((z_ref_full_enc - mean) / std) * normalizer_scale
             if prof: prof.mark("kopia na GPU + latenty (enkoder kodeka)")
 
             _, C, T = z_1.shape
-            valid_mel_len = lengths.to(device).float() / hop_length
-            valid_z_len = (valid_mel_len / chunk_compress_factor).ceil().long().clamp(min=1, max=T)
+            if latents_dir:   # długości są już w klatkach
+                valid_z_len = lengths.to(device).long().clamp(min=1, max=T)
+            else:
+                valid_mel_len = lengths.to(device).float() / hop_length
+                valid_z_len = (valid_mel_len / chunk_compress_factor).ceil().long().clamp(min=1, max=T)
             # drop the centred STFT's extra frame: inference has no masked frame after the longest row
             T = int(valid_z_len.max())
             z_1 = z_1[:, :, :T]
@@ -648,8 +675,11 @@ def train(
             latent_mask = (torch.arange(T, device=device).expand(B, T) < valid_z_len.unsqueeze(1)).unsqueeze(1).float()
             z_1 = z_1 * latent_mask
 
-            valid_mel_len_ref = ref_lengths.to(device).float() / hop_length
-            valid_z_len_ref = (valid_mel_len_ref / chunk_compress_factor).ceil().long().clamp(min=1, max=z_ref_full.shape[2])
+            if latents_dir:
+                valid_z_len_ref = ref_lengths.to(device).long().clamp(min=1, max=z_ref_full.shape[2])
+            else:
+                valid_mel_len_ref = ref_lengths.to(device).float() / hop_length
+                valid_z_len_ref = (valid_mel_len_ref / chunk_compress_factor).ceil().long().clamp(min=1, max=z_ref_full.shape[2])
 
             T_ref_in = z_ref_full.shape[2]
             ref_full_mask = (torch.arange(T_ref_in, device=device).expand(B, T_ref_in) < valid_z_len_ref.unsqueeze(1)).unsqueeze(1).float()

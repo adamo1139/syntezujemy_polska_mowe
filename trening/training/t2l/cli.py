@@ -49,6 +49,8 @@ def main():
                         help="Length-bucketed batches with this padded-seconds budget per GPU (overrides ttl.train.batch_seconds; 0 = fixed --batch_size)")
     parser.add_argument("--num_workers", type=int, default=4, help="data-loading processes per GPU")
     parser.add_argument("--profile", type=int, default=0, help="time the parts of a training step over N steps (GPU 0) and print averages")
+    parser.add_argument("--latents", type=str, default=None,
+                        help="katalog z policz_latenty.py: gotowe latenty zamiast liczenia ich enkoderem w każdym kroku")
     args = parser.parse_args()
 
     set_seed(42 + int(os.environ.get("RANK", "0")))  # per rank: else every rank draws the same t / noise
@@ -71,6 +73,7 @@ def main():
         batch_seconds=args.batch_seconds,
         num_workers=args.num_workers,
         profile=args.profile,
+        latents_dir=args.latents,
     )
 
 if __name__ == "__main__":
