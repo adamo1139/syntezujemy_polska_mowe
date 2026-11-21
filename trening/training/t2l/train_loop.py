@@ -34,6 +34,8 @@ from training.t2l.cfg_utils import (
     adamw_groups,
     build_constant_scheduler,
     BucketBatchSampler,
+    StepProfiler,
+    timed_batches,
     build_lr_scheduler,
     ddp_state_dict,
     seed_worker,
@@ -135,6 +137,8 @@ def train(
     dp_checkpoint: str = "checkpoints/duration_predictor/duration_predictor_final.pt",
     avg_every: int = 0,
     batch_seconds: Optional[float] = None,
+    num_workers: int = 4,
+    profile: int = 0,
 ):
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")   # gloo: próby na CPU
@@ -203,6 +207,9 @@ def train(
     weight_decay = float(train_cfg.get("weight_decay", 0.01))
     # "constant": stałe tempo po rozgrzewce (warmup_steps); "multistep" (oryginał): połowienie w lr_milestones
     lr_schedule = str(train_cfg.get("lr_schedule", "multistep"))
+    # krok, od którego działa SPFM (oryginał: 40 000 na sztywno w spfm.py)
+    if spfm_start_override is None and "spfm_start" in train_cfg:
+        spfm_start_override = int(train_cfg["spfm_start"])
     warmup_steps = int(train_cfg.get("warmup_steps", 0))
     if "lr" in train_cfg and not finetune: lr = float(train_cfg["lr"])
     save_every = int(train_cfg.get("save_every", 1000))            # kroki między punktami kontrolnymi (i próbkami)
@@ -492,7 +499,7 @@ def train(
     dataloader = DataLoader(
         dataset, 
         **loader_batching,
-        num_workers=4, 
+        num_workers=num_workers, 
         collate_fn=collate_text2latent,
         pin_memory=True,
         persistent_workers=True,
@@ -555,6 +562,8 @@ def train(
     last_saved_step = global_step  # the checkpoint we resumed from (or step 0) is not written again
     last_latest_step = global_step
 
+    prof = StepProfiler(device, profile) if profile > 0 and rank == 0 else None
+
     while global_step < max_steps:
         if hasattr(sampler, 'set_epoch'): sampler.set_epoch(epoch_base + epoch)
         epoch += 1
@@ -573,7 +582,7 @@ def train(
         epoch_rsf_rand = 0.0
         epoch_rsf_aug = 0.0
 
-        for batch_idx, batch in enumerate(progress_bar):
+        for batch_idx, batch in enumerate(timed_batches(progress_bar, prof)):
             if global_step >= max_steps: break
 
             if len(batch) == 9:
@@ -624,6 +633,7 @@ def train(
                 z_ref_full_enc = ae_encoder(mel_ref)
                 z_ref_full_enc = compress_latents(z_ref_full_enc, factor=chunk_compress_factor)
                 z_ref_full = ((z_ref_full_enc - mean) / std) * normalizer_scale
+            if prof: prof.mark("kopia na GPU + latenty (enkoder kodeka)")
 
             _, C, T = z_1.shape
             valid_mel_len = lengths.to(device).float() / hop_length
@@ -646,6 +656,7 @@ def train(
                 z_1, valid_z_len, z_ref_full, valid_z_len_ref, is_self_ref, device,
                 chunk_compress_factor=chunk_compress_factor
             )
+            if prof: prof.mark("wycinki wzorca głosu")
 
             amp_ctx = (lambda: torch.autocast(device_type=device.type, dtype=amp_dtype)) if amp_dtype else contextlib.nullcontext
             with amp_ctx():
@@ -691,6 +702,7 @@ def train(
                   u_key=u_key,
               )
             spfm_mask = spfm_out.spfm_mask
+            if prof: prof.mark("enkodery wzorca i tekstu (+ SPFM)")
             if spfm_out.ran_spfm:
                 spfm_dirty_total += spfm_out.dirty_count
                 spfm_total_samples += B
@@ -757,6 +769,7 @@ def train(
                     style_keys=style_keys_final,
                 )
             v_pred = v_pred.float()   # strata i porównania w float32
+            if prof: prof.mark("przygotowanie CFG + pole wektorowe w przód")
 
             final_mask = latent_mask_exp * target_loss_mask_exp
             mask_ct = final_mask.expand(-1, C, -1)
@@ -794,6 +807,7 @@ def train(
 
             loss = loss / accumulation_steps
             loss.backward()
+            if prof: prof.mark("strata + przejście wstecz")
 
             if (batch_idx + 1) % accumulation_steps == 0:
                 if not avg_mode:
@@ -811,6 +825,9 @@ def train(
                     ema.update()
 
             epoch_loss += loss.item() * accumulation_steps
+            if prof:
+                prof.mark("optymalizator + uśrednianie wag + .item()")
+                prof.step_done()
             num_batches += 1
             postfix = dict(
                 loss=epoch_loss / num_batches,

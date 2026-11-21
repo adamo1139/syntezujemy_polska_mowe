@@ -125,6 +125,57 @@ def all_reduce_grads(params) -> None:
             dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
 
 
+class StepProfiler:
+    """Pomiar czasu części kroku (--profile N): średnie z kroków po rozgrzewce, z synchronizacją GPU, tylko karta 0."""
+
+    def __init__(self, device, n_steps, warmup=None):
+        import time as _time
+        warmup = min(20, n_steps) if warmup is None else warmup
+        self._time, self.device, self.n_steps, self.warmup = _time, device, n_steps, warmup
+        self.t, self.n, self.sums, self.order, self.done = None, 0, {}, [], False
+
+    def _now(self):
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        return self._time.perf_counter()
+
+    def mark(self, name):
+        if self.done:
+            return
+        now = self._now()
+        if self.t is not None and self.n > self.warmup:
+            if name not in self.sums:
+                self.sums[name] = 0.0; self.order.append(name)
+            self.sums[name] += now - self.t
+        self.t = now
+
+    def step_done(self):
+        if self.done:
+            return
+        self.n += 1
+        if self.n >= self.warmup + self.n_steps:
+            k = self.n - self.warmup; total = sum(self.sums.values())
+            print(f"[profil] średnio z {k} kroków: {1000 * total / k:.1f} ms/krok ({k / max(total, 1e-9):.2f} kroku/s)")
+            for name in self.order:
+                print(f"[profil]   {name:<44} {1000 * self.sums[name] / k:8.1f} ms  {100 * self.sums[name] / max(total, 1e-9):5.1f}%")
+            self.done = True
+
+
+def timed_batches(iterable, prof):
+    """Iteracja po partiach z pomiarem: czas od końca poprzedniego kroku do pobrania partii to czekanie na dane."""
+    it = iter(iterable)
+    while True:
+        if prof is not None:
+            prof.mark("reszta pętli (log, zapis, próbki)")
+        try:
+            batch = next(it)
+        except StopIteration:
+            return
+        if prof is not None:
+            prof.mark("czekanie na dane")
+        yield batch
+
+
 class BucketBatchSampler:
     """Partie z klipów podobnej długości, o stałym budżecie łącznej (dopełnionej) długości.
 

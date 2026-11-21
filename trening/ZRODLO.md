@@ -52,3 +52,4 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
   nowszy od ostatniego `ckpt_step_*.pt`.
 - **Model tekst→latenty**: mieszana precyzja bf16 (`ttl.train.amp`) i partie po długości z budżetem
   (`BucketBatchSampler`, `ttl.train.batch_seconds`, `--batch_seconds`); zbiór danych zapamiętuje długości klipów.
+- **Model tekst→latenty**: `--profile`, `--num_workers`, początek SPFM z konfiguracji (`ttl.train.spfm_start`).

@@ -72,11 +72,12 @@
       "latest_every": 1000,
       "amp": "bf16",
       "batch_seconds": 160,
-      "max_batch": 64
+      "max_batch": 64,
+      "spfm_start": 15000
     },
     "rsf": {
       "enabled": true,
-      "start_step": 200000,
+      "start_step": 50000,
       "lambda_rand": 0.2,
       "lambda_aug": 0.2
     },

@@ -47,6 +47,8 @@ def main():
                         help="Multi-GPU without DDP: average the per-GPU copies every N optimizer steps (0 = DDP)")
     parser.add_argument("--batch_seconds", type=float, default=None,
                         help="Length-bucketed batches with this padded-seconds budget per GPU (overrides ttl.train.batch_seconds; 0 = fixed --batch_size)")
+    parser.add_argument("--num_workers", type=int, default=4, help="data-loading processes per GPU")
+    parser.add_argument("--profile", type=int, default=0, help="time the parts of a training step over N steps (GPU 0) and print averages")
     args = parser.parse_args()
 
     set_seed(42 + int(os.environ.get("RANK", "0")))  # per rank: else every rank draws the same t / noise
@@ -67,6 +69,8 @@ def main():
         dp_checkpoint=args.dp_checkpoint,
         avg_every=args.avg_every,
         batch_seconds=args.batch_seconds,
+        num_workers=args.num_workers,
+        profile=args.profile,
     )
 
 if __name__ == "__main__":
