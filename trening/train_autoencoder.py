@@ -462,6 +462,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume', type=str, default=None, help='Training checkpoint (.pt) to resume from')
     parser.add_argument('--eval_input', type=str, default=None, help='Audio file reconstructed into <checkpoint_dir>/eval at every save')
+    parser.add_argument('--num_workers', type=int, default=None, help='Data-loading processes per GPU (overrides ae.train.num_workers)')
     parser.add_argument('--avg_every', type=int, default=0,
                         help='Multi-GPU without per-step gradient sync: each GPU trains its own copy and the copies are averaged every N steps (0 = DDP)')
     parser.add_argument('--eval_every', type=int, default=None, help='Reconstruct --eval_input every N steps (default: ae.train.save_interval)')
@@ -545,7 +546,7 @@ def main():
     dataset = TTSDataset(data_cfg['train_metadata'], sample_rate=data_cfg['sample_rate'], segment_size=data_cfg.get('segment_size'),
                          end_crop_prob=0.5 if args.edge_aware else 0.0, drop_list=args.drop_list)
     sampler = DistributedSampler(dataset)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size or train_cfg['batch_size'], sampler=sampler, num_workers=train_cfg['num_workers'],
+    dataloader = DataLoader(dataset, batch_size=args.batch_size or train_cfg['batch_size'], sampler=sampler, num_workers=args.num_workers if args.num_workers is not None else train_cfg['num_workers'],
                             collate_fn=collate_fn_edge if args.edge_aware else collate_fn, pin_memory=True, persistent_workers=True, prefetch_factor=2)
     decoder_cfg = dict(ae_cfg['decoder'])
     if args.decoder_pad_mode: decoder_cfg['pad_mode'] = args.decoder_pad_mode
