@@ -306,6 +306,10 @@ def evaluate(encoder, decoder, mel_transform, input_wav_path, output_dir, step, 
             enc_mod = encoder.module if isinstance(encoder, DDP) else encoder
             dec_mod = decoder.module if isinstance(decoder, DDP) else decoder
             y_hat = dec_mod(enc_mod(mel_transform(wav)))
+            # Wyśrodkowane STFT dodaje jedną ramkę ponad długość nagrania. W treningu ten nadmiar jest obcinany
+            # i nigdy nie trafia do straty, więc dekoder produkuje tam dowolnie duży skok; bez obcięcia skok
+            # zaniżał głośność całej próbki przy normalizacji poniżej.
+            y_hat = y_hat[..., : wav.shape[-1]]
             max_val = y_hat.abs().max().item()
             y_hat_final = y_hat.squeeze()
             if max_val > 1.0: y_hat_final /= (max_val + 1e-8)
