@@ -44,6 +44,7 @@ class Text2LatentDataset(Dataset):
         default_lang: str = "he",         # Fallback language if CSV has no 'lang' column
         affricate_ligatures: bool = False,  # fold t͡s/tʃ/dʒ/dz into ʦ/ʧ/ʤ/ʣ (config key)
         lang_tags: bool = False,          # '<lang>' + ids + '</lang>' (config key)
+        load_ref: bool = True,            # False: bez drugiego klipu jako wzorca (zwracany jest ten sam klip)
     ):
         self.sample_rate = sample_rate
         self.hop_length = hop_length
@@ -51,6 +52,7 @@ class Text2LatentDataset(Dataset):
         self.max_text_len = max_text_len
         self.default_lang = default_lang
         self.lang_tags = lang_tags
+        self.load_ref = load_ref
 
         # --- 1. Load Metadata ---
         if not os.path.exists(metadata_path):
@@ -299,7 +301,7 @@ class Text2LatentDataset(Dataset):
         # 2. Reference Audio Strategy (Zero-Shot Training)
         same_speaker_indices = self.speaker_to_indices.get(speaker_id, [])
         # Cross-utterance reference: pick a different utterance from same speaker
-        use_cross_ref = len(same_speaker_indices) > 1
+        use_cross_ref = self.load_ref and len(same_speaker_indices) > 1
         
         if use_cross_ref:
             # O(1) rejection sampling — avoids building an O(N) exclusion list

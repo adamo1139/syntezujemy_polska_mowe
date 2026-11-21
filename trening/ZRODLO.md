@@ -41,3 +41,5 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **`usrednij_kodek.py`** (nasz): WSM dla kodeka, uśrednianie wag z kilku punktów kontrolnych z oceną na odłożonych klipach.
 - **Model tekst→latenty**: `--avg_every` (okresowe uśrednianie wag zamiast DDP); proces rozproszony na CPU
   używa gloo (do prób bez GPU).
+- **Predyktor długości**: wiele kart przez torchrun i DDP, `--num_workers`; bez wczytywania drugiego klipu jako
+  wzorca, którego ten trener nie używa (`load_ref=False` w zbiorze danych).

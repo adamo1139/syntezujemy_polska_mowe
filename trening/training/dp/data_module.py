@@ -155,7 +155,8 @@ def collate_dp(batch, spk2idx=None, unknown_spk=0):
     return _pad_wavs_texts(wavs, texts, speaker_ids)
 
 def get_dp_dataloader(metadata_path: str, batch_size: int, num_workers: int = 16, affricate_ligatures: bool = False,
-                      lang_tags: bool = False, sample_rate: int = 44100, max_wav_sec: float = 20, max_text_len: int = 800):
+                      lang_tags: bool = False, sample_rate: int = 44100, max_wav_sec: float = 20, max_text_len: int = 800,
+                      rank: int = 0, world_size: int = 1):
     dataset = Text2LatentDataset(
         metadata_path,
         sample_rate=sample_rate,
@@ -163,6 +164,7 @@ def get_dp_dataloader(metadata_path: str, batch_size: int, num_workers: int = 16
         max_text_len=max_text_len,
         affricate_ligatures=affricate_ligatures,
         lang_tags=lang_tags,
+        load_ref=False,   # predyktor bierze wzorzec z latentów tego samego klipu; drugi klip byłby wczytywany na darmo
     )
     speaker_ids = dataset.speaker_ids
     unique_speakers, counts = np.unique(speaker_ids, return_counts=True)
@@ -179,7 +181,9 @@ def get_dp_dataloader(metadata_path: str, batch_size: int, num_workers: int = 16
     num_speakers = len(uniq)
     print("num_speakers mapped:", num_speakers)
     weights = np.array([1.0 / freq[s] for s in speaker_ids], dtype=np.float32).tolist()
-    sampler = WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True)
+    # Każda karta losuje z innym ziarnem i bierze 1/world_size epoki, więc razem to jedna epoka.
+    sampler = WeightedRandomSampler(weights, num_samples=max(1, len(dataset) // world_size), replacement=True,
+                                    generator=torch.Generator().manual_seed(1234 + rank))
     collate_fn = partial(collate_dp, spk2idx=spk2idx, unknown_spk=0)
     dataloader = DataLoader(
         dataset,

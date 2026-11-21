@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--out", type=str, default="checkpoints/duration_predictor")
     parser.add_argument("--ae_checkpoint", type=str, default="checkpoints/ae/blue_codec.safetensors")
     parser.add_argument("--stats_path", type=str, default="stats_multilingual.pt")
+    parser.add_argument("--num_workers", type=int, default=4, help="data-loading processes per GPU")
     args = parser.parse_args()
     
     train_duration_predictor(
@@ -28,6 +29,7 @@ def main():
         checkpoint_dir=args.out,
         ae_checkpoint=args.ae_checkpoint,
         stats_path=args.stats_path,
+        num_workers=args.num_workers,
     )
 
 if __name__ == "__main__":

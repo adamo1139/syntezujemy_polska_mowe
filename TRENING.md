@@ -117,13 +117,21 @@ Statystyki są związane z konkretnym kodekiem: po każdym nowym treningu kodeka
 
 ## 4. Predyktor długości
 
-Mały model (0,5M), jedna karta, kilka tysięcy kroków:
+Mały model (0,5M), kilka tysięcy kroków. Wiele kart przez zwykłe DDP: przy tak małym modelu synchronizacja
+gradientów to ok. 2 MB na krok, więc PCIe riga jej nie dławi. `--batch_size` jest na kartę (16 × 6 = 96 klipów
+na krok; przepis oryginału to 64–128).
 
 ```bash
-python -m training.dp.cli --config ../dane/polski_100m.json --data ../dane/bluetts_train.csv \
+NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1 NCCL_CUMEM_HOST_ENABLE=0 \
+CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 -m training.dp.cli \
+  --config ../dane/polski_100m.json --data ../dane/bluetts_train.csv \
   --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --stats_path ../modele/stats.pt \
-  --out ../modele/dp --max_steps 6000 --batch_size 64 --device cuda:1
+  --out ../modele/dp --max_steps 6000 --batch_size 16 --num_workers 3
 ```
+
+Na jednej karcie: `python -m training.dp.cli ... --batch_size 64 --device cuda:1` (bez `torchrun`).
+Co 20 kroków trener wypisuje przewidziane i prawdziwe długości kilku klipów w sekundach. Wynik:
+`modele/dp/duration_predictor_final.pt`.
 
 ## 5. Model tekst → latenty (ok. 75M)
 

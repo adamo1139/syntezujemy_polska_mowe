@@ -2,7 +2,9 @@ import os
 import json
 import random
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from tqdm import tqdm
 
@@ -101,9 +103,25 @@ def train_duration_predictor(
     batch_size: int = 64,
     lr: float = 1e-4,
     device: str = "cuda:1" if torch.cuda.is_available() else "cpu",
+    num_workers: int = 4,
 ):
+    # Wiele kart: uruchomienie przez torchrun (zmienne RANK/WORLD_SIZE) -> jedna karta na proces, DDP.
+    distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
+    rank, world_size = 0, 1
+    if distributed:
+        dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
+        rank, world_size = dist.get_rank(), dist.get_world_size()
+        local_rank = int(os.environ["LOCAL_RANK"])
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            device = f"cuda:{local_rank}"
+        else:
+            device = "cpu"
+        random.seed(42 + rank); torch.manual_seed(42 + rank)
+    main_proc = rank == 0
     os.makedirs(checkpoint_dir, exist_ok=True)
-    print(f"Initializing Duration Predictor training on {device}...")
+    if main_proc:
+        print(f"Initializing Duration Predictor training on {device}" + (f" (+{world_size - 1} more GPUs, DDP)" if distributed else "") + "...")
     dp_cfg = _load_dp_config(config_path)
     full_cfg = dp_cfg.get("_full", {})
     latent_dim = int(dp_cfg.get("latent_dim", 24))
@@ -132,6 +150,8 @@ def train_duration_predictor(
         edge_fill=dp_cfg.get("edge_fill", False),
     )
     
+    if distributed:
+        model = DDP(model, device_ids=[int(os.environ["LOCAL_RANK"])] if torch.cuda.is_available() else None)
     optimizer = AdamW(model.parameters(), lr=lr)
     lang_tags = bool(full_cfg.get("lang_tags", False))
     # Audio w częstotliwości kodeka i z jego krokiem (oryginał miał tu 44100 i 512 na sztywno)
@@ -141,7 +161,8 @@ def train_duration_predictor(
     _limits = full_cfg.get("data", {})
     dataloader = get_dp_dataloader(metadata_path, batch_size, affricate_ligatures=bool(full_cfg.get("affricate_ligatures", False)),
                                    lang_tags=lang_tags, sample_rate=ae_sample_rate,
-                                   max_wav_sec=float(_limits.get("max_wav_sec", 20)), max_text_len=int(_limits.get("max_text_len", 800)))
+                                   max_wav_sec=float(_limits.get("max_wav_sec", 20)), max_text_len=int(_limits.get("max_text_len", 800)),
+                                   num_workers=num_workers, rank=rank, world_size=world_size)
     
     if not os.path.exists(stats_path):
         print(f"Error: Stats file {stats_path} not found.")
@@ -162,7 +183,7 @@ def train_duration_predictor(
     print("Starting DP training loop...")
     while global_step < max_steps:
         model.train()
-        progress_bar = tqdm(dataloader, desc=f"Step {global_step}/{max_steps}")
+        progress_bar = tqdm(dataloader, desc=f"Step {global_step}/{max_steps}", disable=not main_proc)
         for batch in progress_bar:
             if global_step >= max_steps:
                 break
@@ -230,7 +251,7 @@ def train_duration_predictor(
                 ref_mask=ref_mask,
                 return_log=True,
             )
-            if global_step == 0:
+            if global_step == 0 and main_proc:
                 print(f"[Sanity] Pred shape: {log_pred.shape}") # Should be [B]
                 print("raw speaker examples:", speaker_ids[:10])
                 print("mapped speaker examples:", speaker_ids[:10])
@@ -245,7 +266,7 @@ def train_duration_predictor(
             # L1 loss on log duration
             loss = F.l1_loss(log_pred, log_gt)
 
-            if global_step % 20 == 0:
+            if global_step % 20 == 0 and main_proc:
                 # Sanity check print (convert back to linear for display)
                 pred_linear = torch.exp(log_pred[:4]).detach()
                 gt_linear = dur_gt[:4].detach()
@@ -260,11 +281,15 @@ def train_duration_predictor(
             global_step += 1
             mean_loss += loss.item()
             progress_bar.set_postfix(loss=mean_loss / (global_step + 1), global_step=global_step)
-            if global_step % 500 == 0:
+            if global_step % 500 == 0 and main_proc:
                 save_path = os.path.join(checkpoint_dir, f"duration_predictor_{global_step}.pt")
-                torch.save(model.state_dict(), save_path)
+                torch.save((model.module if distributed else model).state_dict(), save_path)
                 print(f"Saved DP checkpoint to {save_path}")
                 
-    final_path = os.path.join(checkpoint_dir, "duration_predictor_final.pt")
-    torch.save(model.state_dict(), final_path)
-    print(f"Duration Predictor training complete. Saved to {final_path}")
+    if main_proc:
+        final_path = os.path.join(checkpoint_dir, "duration_predictor_final.pt")
+        torch.save((model.module if distributed else model).state_dict(), final_path)
+        print(f"Duration Predictor training complete. Saved to {final_path}")
+    if distributed:
+        dist.barrier()
+        dist.destroy_process_group()
