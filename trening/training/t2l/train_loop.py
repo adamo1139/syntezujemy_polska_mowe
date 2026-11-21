@@ -29,6 +29,7 @@ from training.t2l.cfg_utils import (
     _latest_ckpt_in_dir,
     _validate_ttl_config,
     all_reduce_grads,
+    average_weights,
     build_lr_scheduler,
     ddp_state_dict,
     seed_worker,
@@ -128,13 +129,17 @@ def train(
     resume_from=None,
     inference_ref_wav: Optional[str] = None,
     dp_checkpoint: str = "checkpoints/duration_predictor/duration_predictor_final.pt",
+    avg_every: int = 0,
 ):
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
-        dist.init_process_group("nccl")
+        dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")   # gloo: próby na CPU
         rank = dist.get_rank()
         local_rank = int(os.environ["LOCAL_RANK"])
-        torch.cuda.set_device(local_rank)
-        device = torch.device("cuda", local_rank)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            device = torch.device("cuda", local_rank)
+        else:
+            device = torch.device("cpu")
         if rank == 0:
             print(f"Initialized DDP on Rank {rank}")
     else:
@@ -391,7 +396,18 @@ def train(
         else:
             print(f"[EMA] decay {ema_decay}: initialised {len(ema.params)} tensors from the current weights")
 
-    if dist.is_initialized():
+    # --avg_every: bez DDP. Każda karta trenuje własną kopię na swojej części danych, a co avg_every kroków
+    # optymalizatora kopie są uśredniane jednym przesłaniem (na rigu DDP dławi się na PCIe).
+    avg_mode = avg_every > 0 and dist.is_initialized() and dist.get_world_size() > 1
+    avg_modules = [text_encoder, reference_encoder, vf_estimator, uncond_params]
+    if avg_mode:
+        average_weights(avg_modules, from_rank0=True)   # wspólny punkt startu
+        if ema is not None:
+            # EMA aktualizowana tylko po uśrednieniu: to samo okno czasowe przy avg_every razy rzadszych aktualizacjach
+            ema.decay = ema_decay ** avg_every
+        if rank == 0:
+            print(f"[avg] uśrednianie wag co {avg_every} kroków na {dist.get_world_size()} kartach, bez DDP")
+    elif dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)
         reference_encoder = DDP(reference_encoder, device_ids=[local_rank], find_unused_parameters=True)
         vf_estimator = DDP(vf_estimator, device_ids=[local_rank], find_unused_parameters=True)
@@ -738,14 +754,19 @@ def train(
             loss.backward()
 
             if (batch_idx + 1) % accumulation_steps == 0:
-                all_reduce_grads(uncond_tokens)
+                if not avg_mode:
+                    all_reduce_grads(uncond_tokens)
                 torch.nn.utils.clip_grad_norm_(params, 10.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
-                if ema is not None:
-                    ema.update()
                 global_step += 1
+                if avg_mode and global_step % avg_every == 0:
+                    average_weights(avg_modules)
+                    if ema is not None:
+                        ema.update()
+                elif ema is not None and not avg_mode:
+                    ema.update()
 
             epoch_loss += loss.item() * accumulation_steps
             num_batches += 1
@@ -987,14 +1008,19 @@ def train(
             for p in params:
                 if p.grad is not None:
                     p.grad.mul_(accumulation_steps / k)
-            all_reduce_grads(uncond_tokens)
+            if not avg_mode:
+                all_reduce_grads(uncond_tokens)
             torch.nn.utils.clip_grad_norm_(params, 10.0)
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
-            if ema is not None:
-                ema.update()
             global_step += 1
+            if avg_mode and global_step % avg_every == 0:
+                average_weights(avg_modules)
+                if ema is not None:
+                    ema.update()
+            elif ema is not None and not avg_mode:
+                ema.update()
 
         if spfm_call_batches > 0:
             if dist.is_initialized():

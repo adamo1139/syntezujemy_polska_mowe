@@ -124,6 +124,32 @@ def all_reduce_grads(params) -> None:
             dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
 
 
+@torch.no_grad()
+def average_weights(modules, from_rank0: bool = False) -> None:
+    """Uśrednia wagi (i bufory zmiennoprzecinkowe) modułów między kartami jednym przesłaniem (local SGD).
+
+    from_rank0=True: wszyscy dostają wagi karty 0 (wspólny start). Stany optymalizatora zostają lokalne.
+    Tensor współdzielony przez kilka modułów jest liczony raz.
+    """
+    if not dist.is_initialized() or dist.get_world_size() < 2:
+        return
+    seen, tensors = set(), []
+    for m in modules:
+        for t in list(m.parameters()) + [b for b in m.buffers() if b.is_floating_point()]:
+            if id(t) not in seen:
+                seen.add(id(t)); tensors.append(t.data if isinstance(t, nn.Parameter) else t)
+    flat = torch.cat([t.reshape(-1).float() for t in tensors])
+    if from_rank0 and dist.get_rank() != 0:
+        flat.zero_()
+    dist.all_reduce(flat)
+    if not from_rank0:
+        flat /= dist.get_world_size()
+    i = 0
+    for t in tensors:
+        n = t.numel()
+        t.copy_(flat[i:i + n].view_as(t)); i += n
+
+
 def build_lr_scheduler(optimizer, base_lr, milestones, global_step, scheduler_state=None, finetune=False):
     """MultiStepLR (gamma 0.5) positioned at ``global_step``; finetune restarts from ``base_lr``.
     On resume the lr is pinned to the closed form: at a milestone MultiStepLR would otherwise halve twice."""

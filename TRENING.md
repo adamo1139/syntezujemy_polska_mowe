@@ -109,7 +109,7 @@ Po wytrenowaniu kodeka, jedna karta, jeden przebieg po danych:
 
 ```bash
 python -m training.compute_latent_stats --tts-json ../dane/polski_100m.json \
-  --ae-ckpt ../modele/kodek_48k/ae_latest.pt --metadata ../dane/bluetts_train.csv \
+  --ae-ckpt ../modele/kodek_48k/ae_wsm_210_220.pt --metadata ../dane/bluetts_train.csv \
   --output ../modele/stats.pt --device cuda:1
 ```
 
@@ -121,7 +121,7 @@ Mały model (0,5M), jedna karta, kilka tysięcy kroków:
 
 ```bash
 python -m training.dp.cli --config ../dane/polski_100m.json --data ../dane/bluetts_train.csv \
-  --ae_checkpoint ../modele/kodek_48k/ae_latest.pt --stats_path ../modele/stats.pt \
+  --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --stats_path ../modele/stats.pt \
   --out ../modele/dp --max_steps 6000 --batch_size 64 --device cuda:1
 ```
 
@@ -131,12 +131,15 @@ python -m training.dp.cli --config ../dane/polski_100m.json --data ../dane/bluet
 NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1 NCCL_CUMEM_HOST_ENABLE=0 \
 CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 -m training.t2l.cli \
   --config ../dane/polski_100m.json --data ../dane/bluetts_train.csv \
-  --ae_checkpoint ../modele/kodek_48k/ae_latest.pt --stats_path ../modele/stats.pt \
+  --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --stats_path ../modele/stats.pt \
   --dp_checkpoint ../modele/dp/duration_predictor_final.pt --out ../modele/t2l \
-  --batch_size 14 --max_steps 1000000 --inference_ref_wav ../glosy/poziomka_dluga.wav
+  --batch_size 14 --max_steps 1000000 --avg_every 20 --inference_ref_wav ../glosy/poziomka_dluga.wav
 ```
 
 - **Wznowienie:** to samo polecenie; trener sam bierze najnowszy punkt kontrolny z `--out`.
+- **`--avg_every 20`:** bez DDP; każda karta trenuje własną kopię, a co 20 kroków kopie są uśredniane (jak przy
+  kodeku, bo DDP dławi się na PCIe riga). EMA jest wtedy aktualizowana tylko po uśrednieniu, z odpowiednio
+  mniejszym współczynnikiem, więc obejmuje to samo okno czasowe.
 - **Wejście:** surowe znaki z zachowaniem wielkich liter (`training/data/text_vocab.py`); słownik pokrywa
   wszystkie znaki z `teksty/wybrane.jsonl`.
 - **Limit długości:** `data.max_wav_sec` = 30 i `data.max_text_len` = 600 w konfiguracji. Zostaje 98% klipów

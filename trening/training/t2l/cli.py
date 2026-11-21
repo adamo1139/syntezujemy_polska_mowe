@@ -43,6 +43,8 @@ def main():
     )
     parser.add_argument("--dp_checkpoint", type=str, default="checkpoints/duration_predictor/duration_predictor_final.pt",
                         help="Duration predictor used for the periodic audio samples")
+    parser.add_argument("--avg_every", type=int, default=0,
+                        help="Multi-GPU without DDP: average the per-GPU copies every N optimizer steps (0 = DDP)")
     args = parser.parse_args()
 
     set_seed(42 + int(os.environ.get("RANK", "0")))  # per rank: else every rank draws the same t / noise
@@ -61,6 +63,7 @@ def main():
         resume_from=args.resume_from,
         inference_ref_wav=args.inference_ref_wav,
         dp_checkpoint=args.dp_checkpoint,
+        avg_every=args.avg_every,
     )
 
 if __name__ == "__main__":
