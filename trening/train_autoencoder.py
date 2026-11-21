@@ -2,6 +2,7 @@ import sys
 import os
 import time
 import copy
+import collections
 import json
 import math
 import subprocess
@@ -412,9 +413,14 @@ class PlateauLR:
     def load_state_dict(self, sd): self.scale, self.best, self.bad = sd['scale'], sd['best'], sd['bad']
 
 class AverageMeter:
-    def __init__(self): self.reset()
-    def reset(self): self.val = self.avg = self.sum = self.count = 0
-    def update(self, val, n=1): self.val = val; self.sum += val * n; self.count += n; self.avg = self.sum / self.count
+    """avg: średnia od startu przebiegu; recent: zwykła średnia z `window` ostatnich kroków (do paska postępu)."""
+    def __init__(self, window=200): self.window = window; self.reset()
+    def reset(self): self.val = self.avg = self.sum = self.count = 0; self.recent = None; self._last = collections.deque(); self._sum = 0.0
+    def update(self, val, n=1):
+        self.val = val; self.sum += val * n; self.count += n; self.avg = self.sum / self.count
+        self._last.append(val); self._sum += val
+        if len(self._last) > self.window: self._sum -= self._last.popleft()
+        self.recent = self._sum / len(self._last)
 
 def load_checkpoint(args, ckpt, encoder, decoder, mpd, mrd, opt_g, opt_d, schedulers, dec_groups, logger):
     # dec_groups (stage 2) are appended to opt_g here: a stage-2 checkpoint saved them, a stage-1 one did not
@@ -504,6 +510,10 @@ def main():
     parser.add_argument('--resume', type=str, default=None, help='Training checkpoint (.pt) to resume from')
     parser.add_argument('--eval_input', type=str, default=None, help='Audio file reconstructed into <checkpoint_dir>/eval at every save')
     parser.add_argument('--profile', type=int, default=0, help='Time the parts of a training step over the first N steps and log the averages')
+    parser.add_argument('--heldout_every', type=int, default=0,
+                        help='Every N steps score a fixed set of held-out clips (TensorBoard Loss/Heldout_*); with --avg_every use a multiple of it')
+    parser.add_argument('--heldout_clips', type=int, default=64, help='Number of held-out clips for --heldout_every')
+    parser.add_argument('--heldout_max_sec', type=float, default=15.0, help='Held-out clips are cut to this many seconds')
     parser.add_argument('--num_workers', type=int, default=None, help='Data-loading processes per GPU (overrides ae.train.num_workers)')
     parser.add_argument('--avg_every', type=int, default=0,
                         help='Multi-GPU without per-step gradient sync: each GPU trains its own copy and the copies are averaged every N steps (0 = DDP)')
@@ -668,6 +678,20 @@ def main():
         val_ds = TTSDataset(data_cfg['val_metadata'], sample_rate=data_cfg['sample_rate'])
         val_clips = [val_ds[i][:data_cfg.get('segment_size')] for i in range(min(len(val_ds), train_cfg.get('val_clips', 64)))]
         eval_interval = train_cfg.get('eval_interval', 10000)
+    # Ocena na odłożonych klipach (--heldout_every): stała pula, te same klipy za każdym razem, tylko karta 0.
+    heldout = None
+    if args.heldout_every > 0 and args.local_rank == 0:
+        _val_ds = TTSDataset(data_cfg['val_metadata'], sample_rate=data_cfg['sample_rate'])
+        _n = min(len(_val_ds), args.heldout_clips)
+        _idx = sorted({round(i * (len(_val_ds) - 1) / max(_n - 1, 1)) for i in range(_n)})   # rozłożone po całej liście walidacyjnej
+        _max = int(args.heldout_max_sec * data_cfg['sample_rate'])
+        heldout = {
+            "clips": [_val_ds[i][:_max] for i in _idx],
+            "mel": mel_transforms_loss,                                            # ta sama miara co strata Mel w treningu
+            "logmel_full": get_mel_transforms(data_cfg, device, "logmel_fullband"),   # logarytmiczna, całe pasmo do 24 kHz
+        }
+        logger.info(f"Ocena na odłożonych klipach co {args.heldout_every} kroków: {len(heldout['clips'])} klipów, "
+                    f"{sum(c.shape[-1] for c in heldout['clips']) / data_cfg['sample_rate'] / 60:.1f} min")
     terms = ExtraTerms(tail_w=args.tail_consistency, hiband_w=args.hiband_w, floor_w=args.floor_w, floor_db=args.floor_db)
     if args.tail_consistency > 0:
         stats = torch.load(args.tail_stats, map_location='cpu')
@@ -705,7 +729,10 @@ def main():
         save_checkpoint(step, epoch, encoder, decoder, mpd, mrd, opt_g, opt_d, schedulers, logger, ckpt_dir, decoder_source, extra)
 
     crop_len = int(data_cfg['sample_rate'] * 0.19)
-    g_meter, d_meter, mel_meter = AverageMeter(), AverageMeter(), AverageMeter()
+    # Pasek postępu: średnia z ostatnich 2 epok (kroków na epokę na jedną kartę, jak liczy tqdm).
+    meter_window = max(1, 2 * len(dataloader))
+    g_meter, d_meter, mel_meter = AverageMeter(meter_window), AverageMeter(meter_window), AverageMeter(meter_window)
+    if args.local_rank == 0: logger.info(f"Pasek postępu: G/D/Mel to średnia z ostatnich {meter_window} kroków (2 epoki)")
     last_saved = None
     
     avg_modules = [encoder, mpd, mrd] + ([] if args.encoder_only else [decoder])
@@ -754,7 +781,9 @@ def main():
                 if step % 10 == 0:
                     writer.add_scalar("Loss/Generator", loss_g, step); writer.add_scalar("Loss/Discriminator", loss_d, step); writer.add_scalar("Loss/Mel", loss_mel, step); writer.add_scalar("Training/LR", lr_sched.get_last_lr()[0], step)
                     for name, value in extras.items(): writer.add_scalar(f"Loss/{name}", value, step)
-                pbar.set_postfix({"Step": step, "G": f"{g_meter.avg:.4f}", "D": f"{d_meter.avg:.4f}", "Mel": f"{mel_meter.avg:.4f}", "LR": f"{lr_sched.get_last_lr()[0]:.2e}"})
+                # Pasek pokazuje średnią z ostatnich 2 epok. Oryginał pokazywał średnią od startu przebiegu, która spada
+                # jeszcze długo po tym, jak bieżąca strata przestała się zmieniać.
+                pbar.set_postfix({"Step": step, "G": f"{g_meter.recent:.4f}", "D": f"{d_meter.recent:.4f}", "Mel": f"{mel_meter.recent:.4f}", "LR": f"{lr_sched.get_last_lr()[0]:.2e}"})
                 if step % train_cfg['save_interval'] == 0:
                     save(step); last_saved = step
                 # próbka odsłuchowa niezależnie od zapisu punktu kontrolnego (--eval_every; domyślnie razem z zapisem)
@@ -763,6 +792,15 @@ def main():
                         evaluate(enc_ema, dec_ema, mel_transform_input, args.eval_input, os.path.join(ckpt_dir, "eval"), step, device,
                                  data_cfg['sample_rate'], args.local_rank, keep_decoder_eval=args.encoder_only)
                         set_train_modes()   # evaluate() leaves BatchNorm in train mode
+                # przy --avg_every liczone po uśrednieniu wag, o ile --heldout_every jest wielokrotnością --avg_every
+                if heldout is not None and step % args.heldout_every == 0:
+                    _t = time.time()
+                    _rec = heldout_recon(_mod(enc_ema), _mod(dec_ema), mel_transform_input, heldout["mel"], heldout["clips"], device)
+                    _full = heldout_recon(_mod(enc_ema), _mod(dec_ema), mel_transform_input, heldout["logmel_full"], heldout["clips"], device)
+                    set_train_modes()   # heldout_recon() leaves the models in eval mode
+                    writer.add_scalar("Loss/Heldout_Recon", _rec, step)
+                    writer.add_scalar("Loss/Heldout_LogMel_Full", _full, step)
+                    logger.info(f"step {step}: odłożone klipy — recon {_rec:.4f}, log-mel całe pasmo {_full:.4f} ({time.time() - _t:.1f} s)")
             if prof:
                 prof.mark("reszta pętli (harmonogram, uśrednianie, log, zapis)")
                 if prof.n == args.profile:

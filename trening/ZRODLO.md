@@ -34,3 +34,5 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **Kodek**: nagranie prawdziwe i wygenerowane przechodzą przez każdy dyskryminator jednym wywołaniem; w kroku
   generatora wagi dyskryminatorów są zamrożone (poza DDP); `--profile`, `--num_workers`; próbka odsłuchowa
   obcinana do długości nagrania.
+- **Kodek**: `--heldout_every` (ocena na stałej puli odłożonych klipów, `Loss/Heldout_*` w TensorBoard); pasek
+  postępu pokazuje średnią z ostatnich 2 epok zamiast średniej od startu przebiegu.
