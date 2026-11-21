@@ -133,6 +133,13 @@ Na jednej karcie: `python -m training.dp.cli ... --batch_size 64 --device cuda:1
 Co 20 kroków trener wypisuje przewidziane i prawdziwe długości kilku klipów w sekundach. Wynik:
 `modele/dp/duration_predictor_final.pt`.
 
+WSM z ostatnich punktów (z oceną na `bluetts_val.csv` każdego punktu i średniej):
+
+```bash
+python usrednij_dp.py --punkty ../modele/dp/duration_predictor_{4500,5000,5500,6000}.pt \
+  --wyjscie ../modele/dp/duration_predictor_wsm.pt --device cuda:1
+```
+
 ## 5. Model tekst → latenty (ok. 75M)
 
 ```bash
@@ -140,7 +147,7 @@ NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1 NCCL_CUMEM_HOST_ENABLE=0 \
 CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 -m training.t2l.cli \
   --config ../dane/polski_100m.json --data ../dane/bluetts_train.csv \
   --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --stats_path ../modele/stats.pt \
-  --dp_checkpoint ../modele/dp/duration_predictor_final.pt --out ../modele/t2l \
+  --dp_checkpoint ../modele/dp/duration_predictor_wsm.pt --out ../modele/t2l \
   --batch_size 14 --max_steps 1000000 --avg_every 20 --inference_ref_wav ../glosy/poziomka_dluga.wav
 ```
 
@@ -157,6 +164,10 @@ CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 -m training.t2l.cli
   `eval_phrases`, w tym ze skrótem, liczbami i procentami.
 - **Miejsce:** punkt kontrolny ma ok. 1,2 GB plus 0,3 GB wersji uśrednionej (EMA); trzymanych jest
   6 ostatnich (`ttl.train.keep_checkpoints`).
+- **Optymalizator (decyzja 2026-11-21):** AdamW, tempo 5e-4 stałe po liniowej rozgrzewce przez 5000 kroków, weight
+  decay 0,1 tylko na macierzach wag (bez biasów, norm i tokenów CFG). Ustawienia: `ttl.train` w konfiguracji
+  (`lr`, `lr_schedule`, `warmup_steps`, `weight_decay`). Oryginał: decay 0 i połowienie tempa po 400/600/800 tys.
+  kroków (`"lr_schedule": "multistep"`). Ze stałym tempem model końcowy robi się przez WSM, jak przy kodeku.
 - **Niewiadome:** partia 14 na kartę i 1 mln kroków to wartości oryginału dla wielu języków i mówców.
   Tempo, zajętość pamięci i to, po ilu krokach mowa staje się zrozumiała, wyjdzie dopiero na rigu.
   Harmonogram uczenia (połowienie po 400, 600 i 800 tys. kroków) jest w `ttl.train.lr_milestones`.

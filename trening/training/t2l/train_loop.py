@@ -30,6 +30,8 @@ from training.t2l.cfg_utils import (
     _validate_ttl_config,
     all_reduce_grads,
     average_weights,
+    adamw_groups,
+    build_constant_scheduler,
     build_lr_scheduler,
     ddp_state_dict,
     seed_worker,
@@ -196,6 +198,10 @@ def train(
     # ttl.train (optional): AdamW weight decay and the steps at which the lr is halved
     train_cfg = ttl_cfg.get("train", {})
     weight_decay = float(train_cfg.get("weight_decay", 0.01))
+    # "constant": stałe tempo po rozgrzewce (warmup_steps); "multistep" (oryginał): połowienie w lr_milestones
+    lr_schedule = str(train_cfg.get("lr_schedule", "multistep"))
+    warmup_steps = int(train_cfg.get("warmup_steps", 0))
+    if "lr" in train_cfg and not finetune: lr = float(train_cfg["lr"])
     save_every = int(train_cfg.get("save_every", 1000))            # kroki między punktami kontrolnymi (i próbkami)
     keep_checkpoints = int(train_cfg.get("keep_checkpoints", 0))   # 0 = trzymaj wszystkie
     lr_milestones = [int(m) for m in train_cfg.get("lr_milestones", [300_000, 600_000])]
@@ -219,7 +225,8 @@ def train(
             f"ccf={chunk_compress_factor} | Ke={Ke} (config {cfg_Ke}) | "
             f"normalizer={normalizer_scale} | sig_min={sigma_min}\n"
             f"  uncond: prob_both={prob_both_uncond} prob_text={prob_text_uncond} total_puncond={puncond}\n"
-            f"  optim: lr={lr} weight_decay={weight_decay} lr_milestones={lr_milestones} (gamma 0.5)\n"
+            f"  optim: lr={lr} weight_decay={weight_decay} schedule={lr_schedule} "
+            f"{('warmup=' + str(warmup_steps)) if lr_schedule == 'constant' else ('lr_milestones=' + str(lr_milestones) + ' (gamma 0.5)')}\n"
             f"  lang_tags={lang_tags}\n"
             f"{'=' * 60}\n"
         )
@@ -309,7 +316,7 @@ def train(
     # each parameter once: the projected style key is shared by the text encoder and the VF
     params = list({id(p): p for m in (text_encoder, reference_encoder, vf_estimator, uncond_params)
                    for p in m.parameters()}.values())
-    optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
+    optimizer = AdamW(adamw_groups(params, weight_decay, uncond_tokens), lr=lr)
 
     global_step = 0
     scheduler_state = None
@@ -357,12 +364,12 @@ def train(
             if u_key is not None:
                 u_key.data.copy_(checkpoint['u_key'])
 
-        optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
+        optimizer = AdamW(adamw_groups(params, weight_decay, uncond_tokens), lr=lr)
         if 'optimizer' in checkpoint and not (finetune or shapes_changed):
             try:
                 optimizer.load_state_dict(checkpoint['optimizer'])
-                for pg in optimizer.param_groups:
-                    pg['weight_decay'] = weight_decay  # the config, not the saved state, sets it
+                for pg, wd in zip(optimizer.param_groups, (weight_decay, 0.0)):
+                    pg['weight_decay'] = wd  # the config, not the saved state, sets it
             except Exception as e:
                 if rank == 0:
                     print(f"Warning: Failed to load optimizer state: {e}")
@@ -381,7 +388,16 @@ def train(
                     )
         if 'scheduler' in checkpoint and not shapes_changed: scheduler_state = checkpoint['scheduler']
 
-    scheduler = build_lr_scheduler(optimizer, lr, lr_milestones, global_step, scheduler_state, finetune)
+    if lr_schedule == "constant":
+        scheduler = build_constant_scheduler(optimizer, lr, warmup_steps, global_step)
+    elif lr_schedule == "multistep":
+        scheduler = build_lr_scheduler(optimizer, lr, lr_milestones, global_step, scheduler_state, finetune)
+    else:
+        raise ValueError(f"ttl.train.lr_schedule: nieznany harmonogram {lr_schedule!r} (constant albo multistep)")
+    if rank == 0:
+        n_decay = sum(p.numel() for p in optimizer.param_groups[0]['params'])
+        print(f"[optim] AdamW lr {lr}, weight decay {weight_decay} na {n_decay / 1e6:.1f}M parametrów (bez biasów, norm i tokenów CFG); "
+              f"harmonogram {lr_schedule}" + (f", rozgrzewka {warmup_steps} kroków" if lr_schedule == 'constant' else f", połowienie w {lr_milestones}"))
 
     # EMA on rank 0 only: DDP keeps every rank's weights identical. The CFG tokens (u_text/u_ref/u_key) are
     # averaged too, so an EMA checkpoint never pairs EMA weights with the live tokens. An older ckpt['ema']

@@ -150,6 +150,27 @@ def average_weights(modules, from_rank0: bool = False) -> None:
         t.copy_(flat[i:i + n].view_as(t)); i += n
 
 
+def adamw_groups(params, weight_decay, no_decay=()):
+    """Grupy dla AdamW: weight decay tylko dla macierzy wag. Bez niego: biasy i wagi normalizacji (tensory 1-D)
+    oraz parametry z `no_decay` (wyuczone tokeny bezwarunkowe do CFG), których ściąganie do zera nie ma sensu."""
+    skip = {id(p) for p in no_decay}
+    decay = [p for p in params if p.ndim > 1 and id(p) not in skip]
+    rest = [p for p in params if not (p.ndim > 1 and id(p) not in skip)]
+    return [{"params": decay, "weight_decay": weight_decay}, {"params": rest, "weight_decay": 0.0}]
+
+
+def build_constant_scheduler(optimizer, base_lr, warmup_steps, global_step):
+    """Stałe tempo uczenia po liniowej rozgrzewce od 1% przez `warmup_steps` kroków; ustawione na `global_step`."""
+    f = lambda s: 1.0 if warmup_steps <= 0 else min(1.0, 0.01 + 0.99 * s / warmup_steps)
+    for pg in optimizer.param_groups:
+        pg['initial_lr'] = base_lr
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, f, last_epoch=global_step - 1)
+    for pg in optimizer.param_groups:   # LambdaLR z last_epoch>=0 nie ustawia lr sam przy tworzeniu
+        pg['lr'] = base_lr * f(global_step)
+    scheduler._last_lr = [base_lr * f(global_step)] * len(optimizer.param_groups)
+    return scheduler
+
+
 def build_lr_scheduler(optimizer, base_lr, milestones, global_step, scheduler_state=None, finetune=False):
     """MultiStepLR (gamma 0.5) positioned at ``global_step``; finetune restarts from ``base_lr``.
     On resume the lr is pinned to the closed form: at a milestone MultiStepLR would otherwise halve twice."""

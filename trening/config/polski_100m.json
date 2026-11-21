@@ -61,15 +61,13 @@
       "sig_min": 1e-08
     },
     "train": {
-      "weight_decay": 0.0,
-      "lr_milestones": [
-        400000,
-        600000,
-        800000
-      ],
+      "weight_decay": 0.1,
       "ema_decay": 0.9999,
       "save_every": 5000,
-      "keep_checkpoints": 6
+      "keep_checkpoints": 6,
+      "lr": 0.0005,
+      "lr_schedule": "constant",
+      "warmup_steps": 5000
     },
     "rsf": {
       "enabled": true,
