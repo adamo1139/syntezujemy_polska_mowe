@@ -6,6 +6,7 @@ tekst 170 znaków, czyli budżet ok. 160 s) na losowych danych, bez wczytywania 
 
 Uruchamiać z katalogu trening/, na wolnej karcie:
   CUDA_VISIBLE_DEVICES=1 python profil_vf.py
+  CUDA_VISIBLE_DEVICES=1 python profil_vf.py --compile     # dodatkowo torch.compile na zmiennych kształtach
 """
 
 from __future__ import annotations
@@ -36,12 +37,37 @@ def zmierz(vf, wejscia, amp, n=10):
     return t_fwd / n, t_bwd / n
 
 
+def krok_ms(vf, wejscia):
+    """Jeden krok w przód i wstecz w bf16, czas w ms."""
+    e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+    e0.record()
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        out = vf(**wejscia)
+    out.float().square().mean().backward()
+    e1.record(); torch.cuda.synchronize()
+    vf.zero_grad(set_to_none=True)
+    return e0.elapsed_time(e1)
+
+
+def ksztalty_jak_w_treningu(n, budzet_s=160.0, ke=6, fps=15.625, seed=0):
+    """(sekwencje, klatki, znaki) jak z kubełków: im dłuższe klipy, tym mniej ich w partii."""
+    import random
+    g = random.Random(seed); wynik = []
+    for _ in range(n):
+        T = g.randint(30, 469)
+        b = max(1, min(64, int(budzet_s * fps // T)))
+        wynik.append((b * ke, T, int(T / fps * 18.7)))
+    return wynik
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", default="config/polski_100m.json")
     p.add_argument("--sekwencje", type=int, default=108, help="B × Ke")
     p.add_argument("--klatki", type=int, default=139)
     p.add_argument("--znaki", type=int, default=170)
+    p.add_argument("--ksztalty", type=int, default=20, help="ile różnych rozmiarów partii w teście zmiennych kształtów")
+    p.add_argument("--compile", action="store_true", help="dodatkowo torch.compile(dynamic=True) na zmiennych kształtach")
     args = p.parse_args()
 
     cfg = json.load(open(args.config, encoding="utf-8"))
@@ -77,6 +103,35 @@ def main() -> None:
         torch.cuda.empty_cache()
 
     torch.backends.cudnn.deterministic, torch.backends.cudnn.enabled = False, True
+
+    # Zmienne kształty jak w treningu z kubełkami: pierwsze spotkanie kształtu vs ten sam kształt drugi raz.
+    def wejscia_dla(Bs, Ts, Ls):
+        with torch.no_grad():
+            st = re_enc(torch.randn(Bs, 144, 60, device=dev), mask=torch.ones(Bs, 1, 60, device=dev))
+        return dict(noisy_latent=torch.randn(Bs, 144, Ts, device=dev), text_emb=torch.randn(Bs, 256, Ls, device=dev),
+                    style_ttl=st, latent_mask=torch.ones(Bs, 1, Ts, device=dev), text_mask=torch.ones(Bs, 1, Ls, device=dev),
+                    current_step=torch.rand(Bs, device=dev),
+                    style_keys=vf.tile.expand(Bs, -1, -1) if getattr(vf, "tile", None) is not None else None)
+
+    def test_ksztaltow(model, nazwa):
+        ks = ksztalty_jak_w_treningu(args.ksztalty)
+        pierwszy = [krok_ms(model, wejscia_dla(*k)) for k in ks]
+        drugi = [krok_ms(model, wejscia_dla(*k)) for k in ks]
+        pozycje = sum(b * t for b, t, _ in ks)
+        print(f"{nazwa:<52} pierwszy raz {sum(pierwszy) / len(ks):7.1f} ms/krok | ten sam kształt drugi raz "
+              f"{sum(drugi) / len(ks):7.1f} ms/krok | {pozycje / sum(drugi) * 1000 / 1e3:.0f} tys. pozycji/s")
+        torch.cuda.empty_cache()
+
+    print(f"\nZmienne kształty ({args.ksztalty} różnych rozmiarów partii, budżet 160 s, Ke 6):")
+    test_ksztaltow(vf, "bf16, cuDNN niedeterministyczny")
+    if args.compile:
+        try:
+            vf_c = torch.compile(vf, dynamic=True)
+            test_ksztaltow(vf_c, "bf16 + torch.compile(dynamic=True)")
+        except Exception as e:
+            print(f"torch.compile: błąd {type(e).__name__}: {str(e)[:120]}")
+    print()
+
     from torch.profiler import ProfilerActivity, profile
     for _ in range(3):
         with torch.autocast("cuda", dtype=torch.bfloat16):
