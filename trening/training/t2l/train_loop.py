@@ -145,6 +145,8 @@ def train(
     wandb_name: Optional[str] = None,
     peak_tflops: float = 153.0,
     log_every: int = 10,
+    compile_vf: bool = False,
+    profile_kernels: int = 0,
 ):
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")   # gloo: próby na CPU
@@ -591,6 +593,15 @@ def train(
     last_latest_step = global_step
 
     prof = StepProfiler(device, profile) if profile > 0 and rank == 0 else None
+    if compile_vf:
+        # torch.compile w miejscu (nn.Module.compile): klucze state_dict bez prefiksu _orig_mod, więc punkty
+        # kontrolne zostają zgodne. dynamic=True, bo kubełki dają w każdym kroku inny kształt partii.
+        import torch._dynamo as _dynamo   # `import torch.x` w funkcji zrobiłby z `torch` zmienną lokalną
+        _dynamo.config.cache_size_limit = max(_dynamo.config.cache_size_limit, 64)
+        unwrap_ddp(vf_estimator).compile(dynamic=True)
+        if rank == 0:
+            print("[compile] pole wektorowe: torch.compile(dynamic=True); pierwsze kroki z nowymi kształtami będą wolne")
+    kernel_prof = None
     metryki = Metryki(
         rank, log_every, peak_tflops, count_params(unwrap_ddp(vf_estimator)), count_params(unwrap_ddp(text_encoder)),
         count_params(unwrap_ddp(reference_encoder)), wandb_project=wandb_project, wandb_name=wandb_name,
@@ -708,6 +719,25 @@ def train(
             amp_ctx = (lambda: torch.autocast(device_type=device.type, dtype=amp_dtype)) if amp_dtype else contextlib.nullcontext
             # raz, w 3. kroku przebiegu: dokładne FLOPs licznikiem PyTorcha do kalibracji szacunku MFU
             steps_seen += 1
+            # --profile_kernels N: profiler PyTorcha na prawdziwych krokach treningu (karta 0), od 30. kroku
+            if rank == 0 and profile_kernels > 0 and steps_seen == 30:
+                from torch.profiler import ProfilerActivity, profile as _tprofile
+                kernel_prof = _tprofile(activities=[ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device.type == "cuda" else []))
+                kernel_prof.__enter__()
+            if kernel_prof is not None and steps_seen == 30 + profile_kernels:
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
+                kernel_prof.__exit__(None, None, None)
+                for _klucz in ("self_cuda_time_total", "self_device_time_total"):
+                    try:
+                        print(f"[kernele] {profile_kernels} kroków treningu, według czasu na GPU:")
+                        print(kernel_prof.key_averages().table(sort_by=_klucz, row_limit=30, max_name_column_width=80))
+                        print("[kernele] według operacji PyTorcha (z wywołaniami potomnymi):")
+                        print(kernel_prof.key_averages().table(sort_by=_klucz.replace("self_", ""), row_limit=30, max_name_column_width=80))
+                        break
+                    except Exception:
+                        continue
+                kernel_prof = None
             flop_counter = None
             if rank == 0 and metryki.kalibracja is None and steps_seen == 3:
                 from torch.utils.flop_counter import FlopCounterMode

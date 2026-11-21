@@ -56,6 +56,9 @@ def main():
     parser.add_argument("--peak_tflops", type=float, default=153.0,
                         help="szczytowa wydajność karty do MFU w TFLOPS (domyślnie 153)")
     parser.add_argument("--log_every", type=int, default=10, help="co ile kroków średnie metryki trafiają do wandb")
+    parser.add_argument("--compile", action="store_true", help="torch.compile(dynamic=True) pola wektorowego")
+    parser.add_argument("--profile_kernels", type=int, default=0,
+                        help="profiler PyTorcha na N krokach treningu (od 30.), tabela najdroższych kerneli i operacji")
     args = parser.parse_args()
 
     set_seed(42 + int(os.environ.get("RANK", "0")))  # per rank: else every rank draws the same t / noise
@@ -83,6 +86,8 @@ def main():
         wandb_name=args.wandb_name,
         peak_tflops=args.peak_tflops,
         log_every=args.log_every,
+        compile_vf=args.compile,
+        profile_kernels=args.profile_kernels,
     )
 
 if __name__ == "__main__":
