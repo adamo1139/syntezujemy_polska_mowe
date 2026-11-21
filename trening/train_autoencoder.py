@@ -510,6 +510,8 @@ def main():
     parser.add_argument('--resume', type=str, default=None, help='Training checkpoint (.pt) to resume from')
     parser.add_argument('--eval_input', type=str, default=None, help='Audio file reconstructed into <checkpoint_dir>/eval at every save')
     parser.add_argument('--profile', type=int, default=0, help='Time the parts of a training step over the first N steps and log the averages')
+    parser.add_argument('--constant_lr', action='store_true', help='Constant learning rate --lr from the current step (no decay)')
+    parser.add_argument('--save_every', type=int, default=None, help='Checkpoint every N steps (overrides ae.train.save_interval)')
     parser.add_argument('--heldout_every', type=int, default=0,
                         help='Every N steps score a fixed set of held-out clips (TensorBoard Loss/Heldout_*); with --avg_every use a multiple of it')
     parser.add_argument('--heldout_clips', type=int, default=64, help='Number of held-out clips for --heldout_every')
@@ -560,6 +562,7 @@ def main():
         raise SystemExit("--encoder_only needs --decoder (an AE .pt checkpoint or 'official')")
     if args.tail_consistency > 0 and not (args.edge_aware and args.tail_stats):
         raise SystemExit("--tail_consistency needs --edge_aware and --tail_stats")
+    if args.constant_lr and args.continue_cosine: raise SystemExit("--constant_lr i --continue_cosine wykluczają się")
     if args.continue_cosine and not args.resume:
         raise SystemExit("--continue_cosine needs --resume")
     if args.lr_warmup and not args.continue_cosine:
@@ -581,6 +584,7 @@ def main():
     with open(args.arch_config, "r") as f: arch_cfg = json.load(f)
     ae_cfg = arch_cfg['ae']
     data_cfg, train_cfg = ae_cfg['data'], ae_cfg['train']
+    if args.save_every: train_cfg['save_interval'] = args.save_every
     # two-stage recipe switches (config/tts_st3.json); a missing key keeps the default recipe
     recon = "logmel_fullband" if args.recon_logmel_fullband else train_cfg.get('recon', 'linmel_12k')
     fm_composite = args.fm_composite or train_cfg.get('fm_composite', False)
@@ -670,6 +674,13 @@ def main():
             for g in opt.param_groups: g['lr'] = g['initial_lr'] = lr
         schedulers, lr_sched = cosine_schedulers(opt_g, opt_d, args.continue_cosine, args.lr_warmup)
         if args.local_rank == 0: logger.info(f"New schedule from step {step}: {args.lr_warmup} warm-up steps, cosine over {args.continue_cosine} steps from lr {lr}")
+    if args.constant_lr:
+        # Stałe tempo uczenia --lr od bieżącego kroku (pod WSM: model końcowy z uśrednienia punktów kontrolnych, bez wygaszania).
+        for opt in (opt_g, opt_d):
+            for g in opt.param_groups: g['lr'] = g['initial_lr'] = lr
+        schedulers = {k: torch.optim.lr_scheduler.LambdaLR(o, lambda _: 1.0) for k, o in (('scheduler_g', opt_g), ('scheduler_d', opt_d))}
+        lr_sched = schedulers['scheduler_g']
+        if args.local_rank == 0: logger.info(f"Stałe tempo uczenia {lr} od kroku {step}")
     if lr_schedule == 'plateau':
         dec_from = ckpt.get('dec_trainable_from', step) if args.stage2 else None   # the decoder lr ramps from here
         for i, g in enumerate(opt_g.param_groups):

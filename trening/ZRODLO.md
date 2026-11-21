@@ -36,3 +36,5 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
   obcinana do długości nagrania.
 - **Kodek**: `--heldout_every` (ocena na stałej puli odłożonych klipów, `Loss/Heldout_*` w TensorBoard); pasek
   postępu pokazuje średnią z ostatnich 2 epok zamiast średniej od startu przebiegu.
+- **Kodek**: `--constant_lr` (stałe tempo uczenia od bieżącego kroku, pod uśrednianie punktów kontrolnych) i
+  `--save_every` (częstość punktów kontrolnych bez zmiany konfiguracji).
