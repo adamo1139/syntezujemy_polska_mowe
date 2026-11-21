@@ -24,6 +24,7 @@ from training.data.audio_utils import ensure_sr
 from training.data.text_vocab import normalize_text, text_to_indices_multilang, wrap_lang_tags
 from training.utils import check_stats_provenance, compress_latents
 from training.t2l.builders import build_models
+from training.t2l.metryki import Metryki, params as count_params
 from training.t2l.ema import ModelEMA, ema_checkpoint
 from training.t2l.cfg_utils import (
     DistributedWeightedSampler,
@@ -140,6 +141,10 @@ def train(
     num_workers: int = 4,
     profile: int = 0,
     latents_dir: Optional[str] = None,
+    wandb_project: Optional[str] = None,
+    wandb_name: Optional[str] = None,
+    peak_tflops: float = 153.0,
+    log_every: int = 10,
 ):
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")   # gloo: próby na CPU
@@ -586,6 +591,15 @@ def train(
     last_latest_step = global_step
 
     prof = StepProfiler(device, profile) if profile > 0 and rank == 0 else None
+    metryki = Metryki(
+        rank, log_every, peak_tflops, count_params(unwrap_ddp(vf_estimator)), count_params(unwrap_ddp(text_encoder)),
+        count_params(unwrap_ddp(reference_encoder)), wandb_project=wandb_project, wandb_name=wandb_name,
+        checkpoint_dir=checkpoint_dir, world_size=dist.get_world_size() if dist.is_initialized() else 1, device=device,
+        config={"tts": full_config, "avg_every": avg_every, "batch_seconds": batch_seconds, "Ke": Ke, "lr": lr,
+                "world_size": dist.get_world_size() if dist.is_initialized() else 1, "latents_dir": latents_dir,
+                "peak_tflops": peak_tflops},
+    )
+    steps_seen = 0
 
     while global_step < max_steps:
         if hasattr(sampler, 'set_epoch'): sampler.set_epoch(epoch_base + epoch)
@@ -692,6 +706,13 @@ def train(
             if prof: prof.mark("wycinki wzorca głosu")
 
             amp_ctx = (lambda: torch.autocast(device_type=device.type, dtype=amp_dtype)) if amp_dtype else contextlib.nullcontext
+            # raz, w 3. kroku przebiegu: dokładne FLOPs licznikiem PyTorcha do kalibracji szacunku MFU
+            steps_seen += 1
+            flop_counter = None
+            if rank == 0 and metryki.kalibracja is None and steps_seen == 3:
+                from torch.utils.flop_counter import FlopCounterMode
+                flop_counter = FlopCounterMode(display=False)
+                flop_counter.__enter__()
             with amp_ctx():
                 ref_values = reference_encoder(z_ref, mask=ref_enc_mask)
 
@@ -840,6 +861,10 @@ def train(
 
             loss = loss / accumulation_steps
             loss.backward()
+            if flop_counter is not None:
+                flop_counter.__exit__(None, None, None)
+                metryki.kalibruj(flop_counter.get_total_flops(),
+                                 metryki.flops_wzor(B, Ke, T, text_ids.shape[1], z_ref.shape[2], spfm_out.ran_spfm))
             if prof: prof.mark("strata + przejście wstecz")
 
             if (batch_idx + 1) % accumulation_steps == 0:
@@ -857,7 +882,16 @@ def train(
                 elif ema is not None and not avg_mode:
                     ema.update()
 
-            epoch_loss += loss.item() * accumulation_steps
+            loss_val = loss.item() * accumulation_steps
+            epoch_loss += loss_val
+            _klatki = float(valid_z_len.sum().item())
+            _extra = {}
+            if spfm_out.ran_spfm:
+                _extra["spfm/dirty_rate_partii"] = spfm_out.dirty_count / max(B, 1)
+            if rsf_enabled and global_step >= rsf_start_step:
+                _extra["train/rsf_rand"] = float(rsf_rand); _extra["train/rsf_aug"] = float(rsf_aug)
+            metryki.krok(global_step, loss_val, scheduler.get_last_lr()[0], B, Ke, T, text_ids.shape[1], z_ref.shape[2],
+                         _klatki, _klatki * hop_length * chunk_compress_factor / ae_sample_rate, spfm_out.ran_spfm, _extra)
             if prof:
                 prof.mark("optymalizator + uśrednianie wag + .item()")
                 prof.step_done()
@@ -1119,6 +1153,7 @@ def train(
                 vf_estimator.train()
                 text_encoder.train()
                 reference_encoder.train()
+                metryki.audio(log_dir, global_step, ae_sample_rate)
 
         # Flush remaining gradients if dataloader length is not divisible by accumulation_steps
         if num_batches % accumulation_steps != 0:
@@ -1159,6 +1194,7 @@ def train(
         if spfm_call_batches > 0 and rank == 0:
             epoch_dirty_rate = spfm_dirty_total / max(spfm_total_samples, 1)
             epoch_score_mean = spfm_score_sum / spfm_call_batches
+            metryki.loguj({"spfm/dirty_rate_epoki": epoch_dirty_rate, "spfm/score_mean": epoch_score_mean}, global_step)
             print(
                 f"[SPFM Epoch] step={global_step} "
                 f"dirty_rate={epoch_dirty_rate:.3f} "
@@ -1166,5 +1202,6 @@ def train(
                 f"batches={spfm_call_batches}"
             )
 
+    metryki.koniec()
     if rank == 0:
         print("Training complete.")

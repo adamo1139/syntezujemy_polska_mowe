@@ -51,6 +51,11 @@ def main():
     parser.add_argument("--profile", type=int, default=0, help="time the parts of a training step over N steps (GPU 0) and print averages")
     parser.add_argument("--latents", type=str, default=None,
                         help="katalog z policz_latenty.py: gotowe latenty zamiast liczenia ich enkoderem w każdym kroku")
+    parser.add_argument("--wandb", type=str, default=None, help="projekt Weights & Biases (bez tej flagi: bez wandb)")
+    parser.add_argument("--wandb_name", type=str, default=None, help="nazwa sesji w wandb")
+    parser.add_argument("--peak_tflops", type=float, default=153.0,
+                        help="szczytowa wydajność karty do MFU w TFLOPS (domyślnie 153)")
+    parser.add_argument("--log_every", type=int, default=10, help="co ile kroków średnie metryki trafiają do wandb")
     args = parser.parse_args()
 
     set_seed(42 + int(os.environ.get("RANK", "0")))  # per rank: else every rank draws the same t / noise
@@ -74,6 +79,10 @@ def main():
         num_workers=args.num_workers,
         profile=args.profile,
         latents_dir=args.latents,
+        wandb_project=args.wandb,
+        wandb_name=args.wandb_name,
+        peak_tflops=args.peak_tflops,
+        log_every=args.log_every,
     )
 
 if __name__ == "__main__":
