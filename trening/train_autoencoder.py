@@ -1,5 +1,6 @@
 import sys
 import os
+import time
 import copy
 import json
 import math
@@ -157,6 +158,26 @@ def extra_losses(terms, encoder, mel_transform, audio, y_hat, z, lengths, mask):
     if terms.floor_w > 0: out["floor"] = (terms.floor_w, silence_floor_loss(y_hat, audio, terms.floor_db, mask))
     return out
 
+class Prof:
+    """Pomiar czasu części kroku treningu (--profile N): średnie z kroków po rozgrzewce, z synchronizacją GPU."""
+    def __init__(self, device, warmup=20):
+        self.device, self.warmup, self.t, self.n, self.sums, self.order = device, warmup, None, 0, {}, []
+    def _now(self):
+        if self.device.type == "cuda": torch.cuda.synchronize(self.device)
+        return time.perf_counter()
+    def start(self): self.t = self._now(); self.n += 1
+    def mark(self, name):
+        now = self._now()
+        if self.n > self.warmup:
+            if name not in self.sums: self.sums[name] = 0.0; self.order.append(name)
+            self.sums[name] += now - self.t
+        self.t = now
+    def report(self, logger):
+        k = max(1, self.n - self.warmup); total = sum(self.sums.values())
+        logger.info(f"[profil] średnio z {k} kroków: {1000 * total / k:.1f} ms/krok ({k / max(total, 1e-9):.2f} kroku/s)")
+        for name in self.order: logger.info(f"[profil]   {name:<38} {1000 * self.sums[name] / k:8.1f} ms  {100 * self.sums[name] / max(total, 1e-9):5.1f}%")
+
+
 def random_crop(audio, y_hat, crop_len, limit):
     """The same random crop of both signals, within the first `limit` samples."""
     if limit <= crop_len: return audio, y_hat
@@ -170,12 +191,13 @@ def recon_l1(real, fake, mel_transforms):
 
 def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_transforms_loss, opt_g, opt_d, device, crop_len, logger,
                update_discriminator=True, lambda_recon=45.0, recon_full_segment=False, fm_composite=False, encoder_only=False, recon_only=False,
-               terms=None, clip_generator=True):
+               terms=None, clip_generator=True, prof=None):
     # recon_only: no adversarial or feature-matching terms for the generator.
     # encoder_only: the frozen decoder stays in the graph, so gradients reach the encoder through it.
     lambda_adv, lambda_fm = 1.0, 0.1
     batch, lengths = batch if isinstance(batch, (tuple, list)) else (batch, None)   # lengths: edge-aware batches
     audio = batch.to(device)
+    if prof: prof.mark("czekanie na dane + kopia na GPU")
     if audio.dim() == 2: audio = audio.unsqueeze(1) 
 
     with torch.no_grad():
@@ -200,6 +222,7 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
         y_hat, audio = y_hat * mask, audio * mask
         if int(supervised.min()) > crop_len: crop_limit = int(supervised.min())   # D never sees the masked zeros
     audio_crop, y_hat_crop = random_crop(audio, y_hat, crop_len, crop_limit)
+    if prof: prof.mark("widmo + enkoder + dekoder (w przód)")
 
     loss_d_total = 0.0
     if update_discriminator:
@@ -214,10 +237,12 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
         torch.nn.utils.clip_grad_norm_(mrd.parameters(), 1.0)
         opt_d.step()
         loss_d_total = loss_d_total.item()
+    if prof: prof.mark("dyskryminatory: w przód, wstecz, krok")
 
     # Reconstruction on the adversarial crop, or on the whole segment with recon_full_segment.
     rec_real, rec_fake = (audio, y_hat) if recon_full_segment else (audio_crop, y_hat_crop)
     L_recon = recon_l1(rec_real, rec_fake, mel_transforms_loss)
+    if prof: prof.mark("strata rekonstrukcji (mel)")
 
     if not recon_only:
         y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(audio_crop, y_hat_crop)
@@ -230,15 +255,19 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
         loss_g_total = lambda_recon * L_recon
     extras = extra_losses(terms or ExtraTerms(), encoder, mel_transform_input, audio, y_hat, z, lengths, mask)
     for w, loss in extras.values(): loss_g_total = loss_g_total + w * loss
+    if prof: prof.mark("generator: dyskryminatory w przód + straty")
     
     if check_for_nan_inf(loss_g_total, "Generator Loss", logger): return None
     opt_g.zero_grad()
     loss_g_total.backward()
+    if prof: prof.mark("generator: wstecz")
     if clip_generator:
         torch.nn.utils.clip_grad_norm_(encoder.parameters(), 5.0)
         if not encoder_only: torch.nn.utils.clip_grad_norm_(decoder.parameters(), 5.0)
     opt_g.step()
-    return loss_g_total.item(), loss_d_total, L_recon.item(), {k: loss.item() for k, (_, loss) in extras.items()}
+    out = loss_g_total.item(), loss_d_total, L_recon.item(), {k: loss.item() for k, (_, loss) in extras.items()}
+    if prof: prof.mark("generator: obcinanie gradientu + krok")
+    return out
 
 def freeze_batchnorm(model):
     """BatchNorm layers in eval mode (running statistics used and not updated)."""
@@ -462,6 +491,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume', type=str, default=None, help='Training checkpoint (.pt) to resume from')
     parser.add_argument('--eval_input', type=str, default=None, help='Audio file reconstructed into <checkpoint_dir>/eval at every save')
+    parser.add_argument('--profile', type=int, default=0, help='Time the parts of a training step over the first N steps and log the averages')
     parser.add_argument('--num_workers', type=int, default=None, help='Data-loading processes per GPU (overrides ae.train.num_workers)')
     parser.add_argument('--avg_every', type=int, default=0,
                         help='Multi-GPU without per-step gradient sync: each GPU trains its own copy and the copies are averaged every N steps (0 = DDP)')
@@ -673,6 +703,9 @@ def main():
         sync_weights(avg_modules, from_rank0=True)   # ten sam punkt startu na każdej karcie
         logger.info(f"Uśrednianie wag co {args.avg_every} kroków na {dist.get_world_size()} kartach (bez synchronizacji gradientów)")
 
+    prof = Prof(device) if args.profile > 0 and args.local_rank == 0 else None
+    if prof: prof.start()
+
     while step < args.total_steps:
         sampler.set_epoch(epoch)
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}", dynamic_ncols=True) if args.local_rank == 0 else dataloader
@@ -682,7 +715,7 @@ def main():
             result = train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_transforms_loss, opt_g, opt_d, device, crop_len, logger,
                                 update_discriminator=(step > args.d_warmup), recon_only=(0 < args.d_warmup and step <= args.d_warmup),
                                 recon_full_segment=(recon != 'linmel_12k'),
-                                fm_composite=fm_composite, encoder_only=args.encoder_only, terms=terms, clip_generator=clip_generator)
+                                fm_composite=fm_composite, encoder_only=args.encoder_only, terms=terms, clip_generator=clip_generator, prof=prof)
             if result is None: break
             loss_g, loss_d, loss_mel, extras = result
             if lr_schedule != 'plateau':
@@ -718,6 +751,11 @@ def main():
                         evaluate(enc_ema, dec_ema, mel_transform_input, args.eval_input, os.path.join(ckpt_dir, "eval"), step, device,
                                  data_cfg['sample_rate'], args.local_rank, keep_decoder_eval=args.encoder_only)
                         set_train_modes()   # evaluate() leaves BatchNorm in train mode
+            if prof:
+                prof.mark("reszta pętli (harmonogram, uśrednianie, log, zapis)")
+                if prof.n == args.profile:
+                    prof.report(logger); prof = None
+                else: prof.n += 1
             step += 1
         epoch += 1
     if args.local_rank == 0 and step >= args.total_steps and last_saved != step - 1:
