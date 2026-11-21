@@ -38,3 +38,4 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
   postępu pokazuje średnią z ostatnich 2 epok zamiast średniej od startu przebiegu.
 - **Kodek**: `--constant_lr` (stałe tempo uczenia od bieżącego kroku, pod uśrednianie punktów kontrolnych) i
   `--save_every` (częstość punktów kontrolnych bez zmiany konfiguracji).
+- **`usrednij_kodek.py`** (nasz): WSM dla kodeka, uśrednianie wag z kilku punktów kontrolnych z oceną na odłożonych klipach.
