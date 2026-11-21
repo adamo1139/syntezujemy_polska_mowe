@@ -29,3 +29,5 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **Pliki FLAC**: ścieżki z rozszerzeniem `.flac` nie dostają już dopisanego `.wav`.
 - **Importy**: wszystko uruchamia się z katalogu `trening/` jako `python -m training...`.
 - **Kodek**: próbka odsłuchowa wczytywana przez `soundfile` (bez `torchcodec` i `ffmpeg`).
+- **Kodek**: `--eval_every` (próbki niezależnie od punktów kontrolnych), wczytywanie samego wycinka z pliku
+  zamiast całego klipu, `--avg_every` (okresowe uśrednianie wag między kartami zamiast DDP).

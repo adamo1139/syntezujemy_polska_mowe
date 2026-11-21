@@ -265,6 +265,34 @@ def init_distributed(local_rank):
     dist.init_process_group(backend='gloo', init_method='env://')
     return torch.device('cpu'), None
 
+@torch.no_grad()
+def sync_weights(modules, from_rank0=False):
+    """Uśrednia wagi (i statystyki BatchNorm) podanych modułów między wszystkimi kartami jednym przesłaniem.
+
+    from_rank0=True: zamiast średniej wszyscy dostają wagi karty 0 (wspólny start). Stany optymalizatorów
+    zostają lokalne. To zwykłe okresowe uśrednianie modeli (local SGD), nie synchronizacja gradientów.
+    """
+    world = dist.get_world_size()
+    if world < 2: return
+    tensors = []
+    for m in modules:
+        tensors += [p.data for p in m.parameters()]
+        tensors += [b for b in m.buffers() if b.is_floating_point()]
+    flat = torch.cat([t.reshape(-1) for t in tensors])
+    if from_rank0:
+        if dist.get_rank() != 0: flat.zero_()
+        dist.all_reduce(flat)
+    else:
+        dist.all_reduce(flat)
+        flat /= world
+    i = 0
+    for t in tensors:
+        n = t.numel()
+        t.copy_(flat[i:i + n].view_as(t)); i += n
+    if os.environ.get("AVG_DEBUG"):
+        print(f"[avg] rank {dist.get_rank()}: {'start z karty 0' if from_rank0 else 'średnia'}, suma kontrolna {flat.double().sum().item():.6f}, {flat.numel() / 1e6:.1f}M wartości", flush=True)
+
+
 def evaluate(encoder, decoder, mel_transform, input_wav_path, output_dir, step, device, target_sr, rank, keep_decoder_eval=False):
     if rank != 0: return
     encoder.eval(); decoder.eval()
@@ -430,6 +458,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume', type=str, default=None, help='Training checkpoint (.pt) to resume from')
     parser.add_argument('--eval_input', type=str, default=None, help='Audio file reconstructed into <checkpoint_dir>/eval at every save')
+    parser.add_argument('--avg_every', type=int, default=0,
+                        help='Multi-GPU without per-step gradient sync: each GPU trains its own copy and the copies are averaged every N steps (0 = DDP)')
     parser.add_argument('--eval_every', type=int, default=None, help='Reconstruct --eval_input every N steps (default: ae.train.save_interval)')
     parser.add_argument('--arch_config', type=str, default='config/tts.json', help='Model and data config')
     parser.add_argument('--local-rank', type=int, default=0)
@@ -541,10 +571,15 @@ def main():
     if train_cfg.get('sync_bn', False) and dist.get_world_size() > 1:
         # per-GPU statistics over a small batch can collapse the encoder stem
         encoder = nn.SyncBatchNorm.convert_sync_batchnorm(encoder)
-    encoder = DDP(encoder, device_ids=ddp_ids)
-    if not args.encoder_only: decoder = DDP(decoder, device_ids=ddp_ids)
-    mpd = DDP(MultiPeriodDiscriminator().to(device), device_ids=ddp_ids)
-    mrd = DDP(MultiResolutionDiscriminator().to(device), device_ids=ddp_ids)
+    if args.avg_every > 0:
+        # Bez DDP: każda karta trenuje własną kopię i nie przesyła gradientów co krok; kopie są uśredniane co N kroków.
+        mpd = MultiPeriodDiscriminator().to(device)
+        mrd = MultiResolutionDiscriminator().to(device)
+    else:
+        encoder = DDP(encoder, device_ids=ddp_ids)
+        if not args.encoder_only: decoder = DDP(decoder, device_ids=ddp_ids)
+        mpd = DDP(MultiPeriodDiscriminator().to(device), device_ids=ddp_ids)
+        mrd = DDP(MultiResolutionDiscriminator().to(device), device_ids=ddp_ids)
 
     spec_cfg = ae_cfg['encoder'].get('spec_processor', {})
     mel_transform_input = LinearMelSpectrogram(sample_rate=spec_cfg.get('sample_rate', data_cfg['sample_rate']), n_fft=spec_cfg.get('n_fft', 2048), hop_length=spec_cfg.get('hop_length', 512), win_length=spec_cfg.get('win_length', 2048), n_mels=spec_cfg.get('n_mels', 1253)).to(device)
@@ -626,6 +661,13 @@ def main():
     g_meter, d_meter, mel_meter = AverageMeter(), AverageMeter(), AverageMeter()
     last_saved = None
     
+    avg_modules = [encoder, mpd, mrd] + ([] if args.encoder_only else [decoder])
+    if args.avg_every > 0:
+        if args.encoder_only or args.stage2 or ema_decay > 0 or lr_schedule == 'plateau':
+            raise SystemExit("--avg_every działa tylko z podstawowym przepisem (bez --encoder_only, --stage2, EMA i harmonogramu plateau)")
+        sync_weights(avg_modules, from_rank0=True)   # ten sam punkt startu na każdej karcie
+        logger.info(f"Uśrednianie wag co {args.avg_every} kroków na {dist.get_world_size()} kartach (bez synchronizacji gradientów)")
+
     while step < args.total_steps:
         sampler.set_epoch(epoch)
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}", dynamic_ncols=True) if args.local_rank == 0 else dataloader
@@ -640,6 +682,8 @@ def main():
             loss_g, loss_d, loss_mel, extras = result
             if lr_schedule != 'plateau':
                 for s in schedulers.values(): s.step()
+            if args.avg_every > 0 and step > 0 and step % args.avg_every == 0:
+                sync_weights(avg_modules)   # przed zapisem i próbką, więc te zawsze dotyczą wag uśrednionych
             if ema_decay > 0:
                 ema_update(enc_ema, _mod(encoder), ema_decay)
                 if not args.encoder_only: ema_update(dec_ema, _mod(decoder), ema_decay)

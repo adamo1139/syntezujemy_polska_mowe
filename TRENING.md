@@ -81,16 +81,23 @@ Pełny trening na 6 kartach:
 NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1 NCCL_CUMEM_HOST_ENABLE=0 \
 CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 train_autoencoder.py \
   --arch_config ../dane/polski_100m.json --checkpoint_dir ../modele/kodek_48k \
-  --total_steps 100000 --eval_input ../glosy/poziomka_dluga.wav --eval_every 2000
+  --total_steps 100000 --avg_every 10 --eval_input ../glosy/poziomka_dluga.wav --eval_every 1000
 ```
 
 - **Wznowienie:** to samo polecenie z `--resume ../modele/kodek_48k/ae_latest.pt`.
+- **`--avg_every 10`: uśrednianie wag zamiast synchronizacji gradientów.** Na rigu zwykły trening
+  wielokartowy (DDP) przesyła gradienty między kartami po każdym kroku i dławi się na PCIe: 6 kart dawało
+  1,5 kroku/s wobec 3 kroków/s na jednej. Z tą flagą każda karta trenuje własną kopię modelu na swojej części
+  danych, a co 10 kroków kopie są uśredniane jednym przesłaniem (61M wartości). Punkty kontrolne i próbki
+  dotyczą zawsze wag uśrednionych. Bez flagi trener działa jak w oryginale.
+- **Partia:** 64 na kartę z konfiguracji (12,9 z 24 GB). Większą ustawia `--batch_size`, ale gdy karty liczą
+  na 100%, tylko wydłuża to krok.
 - **Trening rozpoczęty wcześniej z klonu `zewn/blue-codec`** jest z tym zgodny: ta sama architektura
   i format punktów kontrolnych, więc można go dokończyć tam albo wznowić stąd.
 - **Liczba kroków jest szacunkiem** (decyzja 2026-11-21: 100 tys.). To ok. 256 przejść przez wszystkie klipy
   i ok. 9 h przy 3 krokach/s (zmierzone na jednej karcie: 3 kroki/s, 12,9 GB VRAM przy partii 64).
   Harmonogram uczenia jest rozpisany na `--total_steps`; przedłużenie: `--resume` z `--continue_cosine`.
-- **Ocena:** co 2000 kroków (`--eval_every`) w `modele/kodek_48k/eval/` ląduje rekonstrukcja
+- **Ocena:** co 1000 kroków (`--eval_every`) w `modele/kodek_48k/eval/` ląduje rekonstrukcja
   `poziomka_dluga.wav`; odsłuch obok oryginału jest ważniejszy niż wartości strat. Próbka to ułamek sekundy
   pracy jednej karty i nie zależy od zapisu punktów kontrolnych (te nadal co 10 tys. kroków).
 - **TensorBoard:** trener sam go uruchamia na porcie 8000 z dostępem z sieci (`--bind_all`).
