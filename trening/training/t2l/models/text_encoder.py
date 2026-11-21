@@ -82,9 +82,13 @@ class ConvNeXtWrapper(nn.Module):
 
 
 class RelativeMultiHeadAttention(nn.Module):
-    def __init__(self, channels: int, n_heads: int, window_size: int = 4, p_dropout: float = 0.0):
+    def __init__(self, channels: int, n_heads: int, window_size: int = 4, p_dropout: float = 0.0, xsa: bool = False):
         super().__init__()
         assert channels % n_heads == 0
+        # XSA (Exclusive Self Attention, arXiv:2603.09078): z_i = y_i - (y_i·v_i) v_i / |v_i|^2, czyli wynik uwagi
+        # bez składowej wzdłuż własnej wartości tokenu. Bez nowych parametrów. Stosowane do części treściowej
+        # (attn @ v); składnik względnych pozycji (attn @ rel_v) jest dodawany bez zmian.
+        self.xsa = xsa
         self.channels = channels
         self.n_heads = n_heads
         self.head_dim = channels // n_heads
@@ -130,6 +134,9 @@ class RelativeMultiHeadAttention(nn.Module):
         attn = self.drop(attn)
 
         out = torch.matmul(attn, v)
+        if self.xsa:
+            vn = torch.nn.functional.normalize(v, dim=-1)
+            out = out - (out * vn).sum(dim=-1, keepdim=True) * vn
 
         rel_v = self.emb_rel_v[0][indices]
         rel_v = rel_v * window_mask[:, :, None]
@@ -164,10 +171,11 @@ class FeedForward(nn.Module):
 
 
 class AttnEncoder(nn.Module):
-    def __init__(self, channels: int, n_heads: int, filter_channels: int, n_layers: int, p_dropout: float = 0.0):
+    def __init__(self, channels: int, n_heads: int, filter_channels: int, n_layers: int, p_dropout: float = 0.0,
+                 xsa: bool = False):
         super().__init__()
         self.attn_layers = nn.ModuleList(
-            [RelativeMultiHeadAttention(channels, n_heads, window_size=4, p_dropout=p_dropout) for _ in range(n_layers)]
+            [RelativeMultiHeadAttention(channels, n_heads, window_size=4, p_dropout=p_dropout, xsa=xsa) for _ in range(n_layers)]
         )
         self.norm_layers_1 = nn.ModuleList([LayerNorm(channels) for _ in range(n_layers)])
         self.ffn_layers = nn.ModuleList(
@@ -344,6 +352,7 @@ class TextEncoder(nn.Module):
         layer_scale_init: float = 1e-6,
         edge_fill: bool = False,
         spte_key_mode: str = "baked",
+        attn_xsa: bool = False,
     ):
         super().__init__()
         self.d_model = d_model
@@ -358,6 +367,7 @@ class TextEncoder(nn.Module):
             filter_channels=attn_filter_channels,
             n_layers=n_attn_layers,
             p_dropout=p_dropout,
+            xsa=attn_xsa,
         )
         self.speech_prompted_text_encoder = StyleAttention(
             text_dim=spte_text_dim,

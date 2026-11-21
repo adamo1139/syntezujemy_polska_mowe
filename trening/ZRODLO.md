@@ -46,3 +46,5 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **Model tekst→latenty**: stałe tempo uczenia z rozgrzewką (`ttl.train.lr_schedule: constant`, `warmup_steps`),
   weight decay tylko na macierzach wag.
 - **`usrednij_dp.py`** (nasz): WSM predyktora długości z oceną na walidacji.
+- **Model tekst→latenty**: opcja XSA w self-attention enkodera tekstu (`attn_encoder.xsa`); dylatacje pola
+  wektorowego `[1, 4, 16, 48]` w konfiguracji.

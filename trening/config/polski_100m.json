@@ -50,7 +50,8 @@
         "filter_channels": 1024,
         "n_heads": 4,
         "n_layers": 4,
-        "p_dropout": 0.0
+        "p_dropout": 0.0,
+        "xsa": true
       },
       "proj_out": {
         "idim": 256,
@@ -159,9 +160,9 @@
           "num_layers": 4,
           "dilation_lst": [
             1,
-            2,
             4,
-            8
+            16,
+            48
           ]
         },
         "convnext_1": {

@@ -164,6 +164,15 @@ CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 -m training.t2l.cli
   `eval_phrases`, w tym ze skrótem, liczbami i procentami.
 - **Miejsce:** punkt kontrolny ma ok. 1,2 GB plus 0,3 GB wersji uśrednionej (EMA); trzymanych jest
   6 ostatnich (`ttl.train.keep_checkpoints`).
+- **Zasięg splotów (decyzja 2026-11-21):** w polu wektorowym `convnext_0.dilation_lst` = `[1, 4, 16, 48]` zamiast
+  `[1, 2, 4, 8]` z BlueV3. Każda klatka widzi ±36,9 s (1153 klatki) zamiast ±9,2 s, więc cały klip do 30 s;
+  zmierzone przez propagację wsteczną z jednej klatki, zasięg ciągły, bez dziur. Liczba parametrów i koszt
+  obliczeń bez zmian (dylatacja nie dodaje wag).
+- **XSA w enkoderze tekstu (decyzja 2026-11-21):** `ttl.text_encoder.attn_encoder.xsa` = true. Exclusive Self
+  Attention (arXiv:2603.09078): z wyniku uwagi usuwana jest składowa wzdłuż własnej wartości tokenu; bez nowych
+  parametrów. Dotyczy 4 warstw self-attention nad tekstem; cross-attention w polu wektorowym zostaje bez zmian
+  (XSA jest zdefiniowane tylko dla self-attention). Praca testowała je wyłącznie na modelach językowych z uwagą
+  przyczynową; tu uwaga jest dwukierunkowa i nad znakami, więc efekt jest nieznany.
 - **Optymalizator (decyzja 2026-11-21):** AdamW, tempo 5e-4 stałe po liniowej rozgrzewce przez 5000 kroków, weight
   decay 0,1 tylko na macierzach wag (bez biasów, norm i tokenów CFG). Ustawienia: `ttl.train` w konfiguracji
   (`lr`, `lr_schedule`, `warmup_steps`, `weight_decay`). Oryginał: decay 0 i połowienie tempa po 400/600/800 tys.

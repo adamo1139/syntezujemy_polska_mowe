@@ -112,6 +112,7 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         layer_scale_init=layer_scale_init,
         edge_fill=edge_fill,
         spte_key_mode=spte_key_mode,
+        attn_xsa=bool(te_cfg["attn_encoder"].get("xsa", False)),
     ).to(device)
 
     reference_encoder = ReferenceEncoder(
