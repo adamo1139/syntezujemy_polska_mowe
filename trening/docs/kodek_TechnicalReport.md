@@ -1,0 +1,276 @@
+# BlueCodec: A Neural Speech Autoencoder for Multilingual TTS
+
+## Technical Report — Stage 1: Speech Autoencoder
+
+---
+
+## 1. Overview
+
+BlueCodec is a neural speech autoencoder designed to serve as the acoustic backbone of a latent-diffusion-based TTS system. Following the general design principle of SupertonicTTS [1], training is divided into three stages: (1) a speech autoencoder that compresses audio into a compact continuous latent space and reconstructs it, (2) a text-to-latent diffusion module, and (3) a duration predictor. This document covers Stage 1 in full.
+
+The autoencoder is trained within a Generative Adversarial Network (GAN) framework, combining reconstruction, adversarial, and feature matching objectives. The resulting model functions as a neural vocoder with a low-dimensional latent bottleneck, operating at 44.1 kHz with a 24-dimensional latent space at approximately 86 Hz.
+
+---
+
+## 2. Input Representation
+
+A key architectural departure from SupertonicTTS is the input feature representation fed to the encoder. Rather than using standard log-mel spectrograms alone, we use a **dual-branch linear-mel representation** implemented in `LinearMelSpectrogram`:
+
+1. **Log-linear spectrogram** — computed via STFT (n_fft=2048, hop=512), then log-compressed: 1025 frequency bins.
+2. **Log-mel spectrogram** — the linear spectrogram projected through a Mel filterbank (228 bands), then log-compressed.
+
+These two representations are concatenated along the frequency axis, yielding a **1253-channel** input feature map at 86 Hz frame rate. This combined representation preserves both fine-grained spectral detail (from the linear bins) and perceptually weighted structure (from the mel bins), which we found in preliminary experiments to accelerate training loss convergence compared to mel-only inputs.
+
+The spectrogram is computed with `torch.no_grad()` at each training step to avoid storing intermediate activations.
+
+---
+
+## 3. Architecture
+
+### 3.1 Encoder (~25.6M parameters)
+
+The encoder is based on the **Vocos** ConvNeXt backbone [2], modified for latent encoding:
+
+```
+Input: [B, 1253, T/512]  (dual log-linear-mel feature)
+  │
+  ├── Conv1d stem: 1253 → 512  (kernel=7, BatchNorm)
+  │
+  ├── ConvNeXt Block × 10  (dilation=1 for all blocks)
+  │     Each block:
+  │       DW-Conv1d (groups=C, kernel=7) → LayerNorm
+  │       → PW-Conv 512→2048 → GELU → PW-Conv 2048→512
+  │       → γ-scale (learnable, init=1e-6) → residual add
+  │
+  └── Conv1d proj: 512 → 24  (1×1) + LayerNorm
+Output: [B, 24, T/512]  (~86 Hz latent)
+```
+
+The encoder uses **non-causal** (standard bilateral padding) convolutions throughout. The original Fourier head of Vocos is replaced by a 1×1 linear projection to the 24-dimensional latent space, followed by channel-wise LayerNorm. The encoder is not used at TTS inference time; its efficient architecture enables fast latent encoding during Stage 2 training.
+
+### 3.2 Decoder (~25.3M parameters)
+
+The decoder mirrors the encoder structure but introduces **causal convolutions** to enable streaming inference:
+
+```
+Input: [B, 24, T/512]  (latent z)
+  │
+  ├── CausalConv1d stem: 24 → 512  (kernel=7)
+  │
+  ├── Causal ConvNeXt Block × 10
+  │     Dilations: [1, 2, 4, 1, 2, 4, 1, 1, 1, 1]
+  │     Same structure as encoder, but left-pad only
+  │     (padding = (kernel−1) × dilation, left side)
+  │
+  ├── BatchNorm1d (512)
+  │
+  └── VocoderHead:
+        CausalConv1d 512 → 2048 (kernel=3)
+        → PReLU
+        → Conv1d 2048 → 512 (1×1)
+        → transpose [B,512,T] → [B,T,512]
+        → reshape [B, T×512]  (sub-pixel expansion)
+Output: [B, T_audio]  (44.1 kHz waveform)
+```
+
+The dilated causal ConvNeXt blocks (pattern `[1,2,4,1,2,4,1,1,1,1]`) provide an effective receptive field while strictly preserving causality. The VocoderHead is inspired by WaveNeXt [3], using a sub-pixel flattening strategy to expand frame-level features directly into the time-domain waveform, without transposed convolutions. Higher hidden dimensionality (2048) and PReLU nonlinearity improve representational capacity over the original design.
+
+The decoder stores learned `latent_mean` and `latent_std` buffers for normalization at inference time, populated from statistics computed over the training set after Stage 1.
+
+### 3.3 Causal vs. Non-Causal Convolution
+
+```
+Non-causal (Encoder):
+  padding = (kernel−1) × dilation // 2   (symmetric, both sides)
+
+Causal (Decoder):
+  padding = (kernel−1) × dilation        (left side only)
+  → no future context, suitable for real-time streaming
+```
+
+---
+
+## 4. Discriminators
+
+Two discriminators operate in parallel to provide perceptual adversarial signal.
+
+### 4.1 Multi-Period Discriminator (MPD)
+
+Five `DiscriminatorP` sub-networks, one per period `p ∈ {2, 3, 5, 7, 11}`. Each sub-network reshapes the waveform into a 2D tensor `[B, 1, T/p, p]` and applies a stack of Conv2d layers (channels: 1→16→64→256→512→512→1, stride=3 except last). Weight normalization is applied. Feature maps from all intermediate layers are collected for the feature matching loss.
+
+### 4.2 Multi-Resolution Discriminator (MRD)
+
+Three `DiscriminatorR` sub-networks at STFT resolutions `(n_fft, hop, win) ∈ {(512,128,512), (1024,256,1024), (2048,512,2048)}`. Each sub-network computes the log-magnitude spectrogram and processes it with a 2D Conv stack (channels: 1→16→16→16→16→16→1). **Spectral normalization** (rather than weight normalization) is applied to all MRD layers, providing additional training stability.
+
+---
+
+## 5. Loss Functions
+
+### 5.1 Generator Loss
+
+$$\mathcal{L}_G = 45 \cdot \mathcal{L}_\text{recon} + 1 \cdot \mathcal{L}_\text{adv} + 0.1 \cdot \mathcal{L}_\text{fm}$$
+
+**Reconstruction loss** $\mathcal{L}_\text{recon}$ — multi-resolution mel L1, averaged over three STFT scales:
+
+| Scale  | n_fft | hop  | win  | n_mels |
+|--------|-------|------|------|--------|
+| Small  | 1024  | 256  | 1024 | 64     |
+| Medium | 2048  | 512  | 2048 | 128    |
+| Large  | 4096  | 1024 | 4096 | 128    |
+
+$$\mathcal{L}_\text{recon} = \frac{1}{3} \sum_s \left\| \text{Mel}_s(y) - \text{Mel}_s(\hat{y}) \right\|_1$$
+
+Note: the reconstruction mel transforms use `MelSpectrogramNoLog` (linear amplitude, no log), while the input features to the encoder use the log-compressed `LinearMelSpectrogram`. This decouples the training signal from the input representation.
+
+**Adversarial loss** $\mathcal{L}_\text{adv}$ — LSGAN generator objective:
+
+$$\mathcal{L}_\text{adv} = \sum_D \mathbb{E}\left[(1 - D(\hat{y}))^2\right]$$
+
+**Feature matching loss** $\mathcal{L}_\text{fm}$ — L1 distance between intermediate discriminator feature maps:
+
+$$\mathcal{L}_\text{fm} = \frac{1}{N} \sum_\ell \mathbb{E}\left[\left\|\text{feat}^{(\ell)}_\text{real} - \text{feat}^{(\ell)}_\text{fake}\right\|_1\right]$$
+
+### 5.2 Discriminator Loss
+
+LSGAN discriminator objective (real → 1, fake → −1):
+
+$$\mathcal{L}_D = \sum_D \mathbb{E}\left[(D(y) - 1)^2 + (D(\hat{y}) + 1)^2\right]$$
+
+---
+
+## 6. Training Configuration
+
+### 6.1 Hyperparameters
+
+| Parameter                   | Value                              |
+|-----------------------------|------------------------------------|
+| Hardware                    | 2× NVIDIA RTX 3090 (PyTorch DDP, NCCL) |
+| Total iterations            | 1,500,000                          |
+| Wall-clock time             | ~4 weeks                           |
+| Optimizer                   | AdamW (β₁=0.8, β₂=0.99, wd=0.01) |
+| Learning rate               | 2×10⁻⁴                             |
+| LR schedule                 | CosineAnnealingLR → η_min=1×10⁻⁶  |
+| Batch size                  | 128 (across 2 GPUs)                |
+| Audio sample rate           | 44,100 Hz                          |
+| Input hop size              | 512 samples (~11.6 ms)             |
+| Latent frame rate           | ~86 Hz                             |
+| Latent dimensionality       | 24                                 |
+| Audio crop length           | 0.19 s (~8,379 samples @ 44.1 kHz) |
+| Grad clip (encoder/decoder) | 5.0                                |
+| Grad clip (discriminators)  | 1.0                                |
+| Discriminator warmup        | 0 steps (active from step 1)       |
+| λ_recon / λ_adv / λ_fm     | 45 / 1 / 0.1                       |
+
+### 6.2 Training Step
+
+Each iteration proceeds as follows:
+
+1. Load a batch of raw audio segments `[B, 1, T]`.
+2. Compute the dual-channel input spectrogram `[B, 1253, T/512]` under `torch.no_grad()`.
+3. Forward pass: `encoder → z → decoder → ŷ`.
+4. Randomly crop both `y` and `ŷ` to a 0.19 s window.
+5. **Discriminator step** (detached `ŷ`): compute $\mathcal{L}_D$ from MPD + MRD, backward, clip gradients, `opt_d.step()`.
+6. **Generator step** (full `ŷ`): compute $\mathcal{L}_G$ from MPD + MRD, backward, clip gradients, `opt_g.step()`.
+7. Step both cosine learning rate schedulers.
+
+---
+
+## 7. Key Differences from SupertonicTTS
+
+While BlueCodec draws architectural inspiration from SupertonicTTS [1], several design choices diverge. The table below uses exact architecture details from the SupertonicTTS paper (arXiv:2503.23108, Appendix A.1).
+
+| Aspect                        | SupertonicTTS [1]                                                                   | BlueCodec                                                                              |
+|-------------------------------|-------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------|
+| **Encoder input**             | 228-dim log-mel spectrogram (FFT=2048, Hann window)                                 | **1253-dim: log-linear (1025) + log-mel (228) concatenated**                           |
+| **Encoder stem**              | Conv1d 228→512 (k=7) + BatchNorm                                                    | Conv1d 1253→512 (k=7) + BatchNorm                                                      |
+| **Encoder blocks**            | 10× ConvNeXt (dim=512, intermediate=2048, k=7, dilation=1), non-causal             | 10× ConvNeXt (dim=512, intermediate=2048, k=7, dilation=1), non-causal                |
+| **Encoder projection**        | Linear 512→24 + LayerNorm                                                           | Conv1d 1×1 512→24 + LayerNorm                                                          |
+| **Decoder stem**              | CausalConv1d 24→512 (k=7) + BatchNorm                                               | CausalConv1d 24→512 (k=7), **no BatchNorm in stem**                                    |
+| **Decoder blocks**            | 10× dilated CausalConvNeXt (dim=512, intermediate=2048, k=7) + BatchNorm           | 10× dilated CausalConvNeXt (dim=512, intermediate=2048, k=7) + BatchNorm               |
+| **Decoder dilations**         | `[1, 2, 4, 1, 2, 4, 1, 1, 1, 1]`                                                   | `[1, 2, 4, 1, 2, 4, 1, 1, 1, 1]`                                                      |
+| **Vocoder head**              | CausalConv1d 512→2048 (k=3) → Linear 2048→512 → reshape                            | CausalConv1d 512→2048 (k=3) → **PReLU** → Conv1d 1×1 2048→512 → transpose+reshape     |
+| **Latent dimensionality**     | 24                                                                                  | 24                                                                                     |
+| **MPD**                       | 5 sub-nets, periods {2,3,5,7,11}, 6 conv layers (16,64,256,512,512,1), weight norm | 5 sub-nets, periods {2,3,5,7,11}, 6 conv layers (16,64,256,512,512,1), weight norm    |
+| **MRD**                       | FFT {512,1024,2048}, hop=FFT/4, 6 Conv2d layers (Table 7), weight norm             | FFT {512,1024,2048}, hop=FFT/4, 6 Conv2d layers (Table 7), **spectral norm**          |
+| **Recon loss domain**         | Log-mel spectrogram                                                                 | **Linear-amplitude mel (no log)**                                                      |
+| **Loss weights**              | λ_recon=45, λ_adv=1, λ_fm=0.1                                                      | λ_recon=45, λ_adv=1, λ_fm=0.1                                                         |
+| **Adversarial crop length**   | 0.19 s                                                                              | 0.19 s                                                                                 |
+| **Optimizer**                 | AdamW (lr=2×10⁻⁴, batch=128)                                                       | AdamW (lr=2×10⁻⁴, batch=128)                                                          |
+| **Total iterations**          | 1,500,000                                                                           | 1,500,000                                                                              |
+| **Sample rate**               | 44.1 kHz                                                                            | 44.1 kHz                                                                               |
+| **Training hardware**         | 4× NVIDIA RTX 4090                                                                  | **2× NVIDIA RTX 3090**                                                                 |
+
+The three genuine architectural differences are: **(1)** the dual-channel input representation (log-linear + log-mel) vs. mel-only, providing finer spectral detail to the encoder; **(2)** the addition of a PReLU nonlinearity in the vocoder head between the two projection layers; and **(3)** spectral normalization in the MRD instead of weight normalization. Notably, the loss formulation, crop strategy, optimizer, iteration count, and sample rate are identical to SupertonicTTS. The primary practical difference is that BlueCodec was trained on consumer-grade 3090 hardware rather than 4090s.
+
+---
+
+## 8. Developer Insights & Architectural Rationale
+
+While BlueCodec shares its foundational DNA with SupertonicTTS [1], the deviations introduced here were not arbitrary. They were chosen to improve training stability, synthesis quality, and phonetic coverage while preserving the efficiency of the original design.
+
+### 8.1 The Dual-Branch Input Advantage
+
+Standard mel spectrograms are effective because they approximate human auditory perception, but that compression inevitably discards part of the high-frequency detail present in the original spectrum. BlueCodec therefore feeds the encoder a 1253-channel dual-branch representation formed by concatenating 1025 log-linear bins with 228 log-mel bins. This gives the model both raw spectral precision and perceptually organized structure at the same time. In practice, this richer representation improved early optimization behavior and accelerated reconstruction-loss convergence relative to mel-only inputs.
+
+### 8.2 PReLU in the Sub-Pixel Vocoder
+
+The decoder must expand a low-rate latent sequence at roughly 86 Hz into a full 44.1 kHz waveform, making the vocoder head a critical capacity bottleneck. Inspired by WaveNeXt, BlueCodec keeps the sub-pixel flattening strategy but inserts a PReLU nonlinearity between the causal projection layers. This is a small modification architecturally, yet an important one functionally: it increases the expressiveness of the head and improves gradient flow when reconstructing fine temporal structure and high-frequency waveform detail.
+
+### 8.3 Taming GAN Instability with Spectral Normalization
+
+Adversarial training at high audio fidelity is often unstable, especially when discriminators become too strong early in training. SupertonicTTS uses weight normalization throughout its discriminators, but in BlueCodec the Multi-Resolution Discriminator was deliberately switched to spectral normalization. By constraining the effective Lipschitz behavior of the MRD layers, this change reduces the risk of discriminator domination and helps maintain a smoother optimization trajectory over the full 1.5 million-step run.
+
+### 8.4 A Multilingual Latent Space
+
+BlueCodec learns its 24-dimensional latent space from multilingual speech rather than English alone, so the latent represents phonetic patterns that English-only training rarely sees, such as emphatic fricatives, uvulars and pharyngeal-adjacent articulations.
+
+### 8.5 High-Fidelity on Consumer Hardware
+
+Achieving real-time 44.1 kHz streaming synthesis is often associated with large compute clusters. BlueCodec shows that strong neural audio compression can be trained on consumer hardware. Efficient ConvNeXt blocks (depthwise-separable convolutions instead of heavy recurrence), a compact 24-channel latent bottleneck, and the sub-pixel expansion head keep the autoencoder footprint modest (on the order of ~51M parameters for encoder + decoder) while targeting full-band reconstruction.
+
+SupertonicTTS reports Stage 1 training on four RTX 4090 GPUs [1]. Using the same iteration budget and batch size on **two RTX 3090** GPUs with PyTorch DDP, this build completed in roughly **four weeks** — a practical datapoint that architectural efficiency and a well-matched training recipe matter as much as raw accelerator count for this class of model.
+
+---
+
+## 9. E12b Training Additions
+
+E12b is a full autoencoder (encoder and decoder) continued from the 1.5M-step model. Its decoder uses replicate causal padding, and its latents are a new space: stats files and downstream models built on the 1.5M model do not transfer to it.
+
+### 9.1 Recipe
+
+Initialisation: the 1.5M encoder and the 1.5M decoder after a decoder-only refit. Then 600k steps on the paper losses (λ_recon 45 on full-band log mel over the whole segment, LSGAN λ_adv 1, feature matching λ_fm 0.1 over MPD and MRD together) plus four terms, all flags of `train_autoencoder.py` ([docs/training.md §5](../docs/training.md)):
+
+| Term | What it does | Weight |
+|---|---|---|
+| Edge-aware batches | crops ending at the clip's end, batches aligned to 3072 samples, per-clip loss mask | — |
+| Tail consistency | last compressed latent frame vs. the same clip encoded with two extra silent chunks | 7.5 |
+| High band | log-magnitude STFT L1 above 12 kHz | 2.0 |
+| Silence floor | decoded level on frames whose source is below −60 dBFS | 10 |
+
+AdamW (β 0.8, 0.99, wd 0.01), batch 64 per GPU, 5k-step warm-up to 1.25×10⁻⁵, then cosine to 1×10⁻⁶ at 600k; encoder BatchNorm frozen from 50k.
+
+### 9.2 Encoding layout
+
+E12b was trained on audio padded to a multiple of 3072 samples (hop 512 × 6), so it is encoded the same way: `6·ceil(L/3072)` latent frames per clip.
+
+### 9.3 Round-trip audit
+
+10 reference clips (resampled to 44.1 kHz), each codec with its own encoding layout:
+
+| Codec | 228-band log-mel L1 | 12–22 kHz energy vs. source | DNSMOS |
+|-------|------:|------:|------:|
+| E12b | **0.669** | **+0.37 dB** | 3.39 |
+| BlueCodec 1.5M | 1.009 | +19.56 dB | 3.40 |
+
+On 100 held-out English clips not in the training data, E12b scores PESQ-WB 2.35 and STOI 0.883. These are objective measures, not a listening test.
+
+---
+
+## References
+
+[1] SupertonicTTS (2025). *SupertonicTTS: A Lightweight and Flexible Text-to-Speech System with Latent Diffusion.* arXiv:2503.23108.
+
+[2] Siuzdak, H. (2023). *Vocos: Closing the gap between time-domain and Fourier-based neural vocoders for high-quality audio synthesis.* arXiv:2306.00814.
+
+[3] WaveNeXt — sub-pixel waveform generation from frame-level features.
+

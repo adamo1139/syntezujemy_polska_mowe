@@ -1,0 +1,31 @@
+# Skąd jest ten kod
+
+Kod w tym katalogu został skopiowany z dwóch repozytoriów na licencji MIT (pliki `LICENSE-BlueTTS`
+i `LICENSE-blue-codec`) i od tej chwili rozwijamy go u siebie.
+
+| co | skąd | commit |
+|---|---|---|
+| `training/` | `github.com/maxmelichov/BlueTTS`, katalog `training/` | `91b1789a4a84764cdf8679fe4bb4c4d0e0e28821` |
+| `config/upstream_tts.json`, `config/upstream_tts_st3.json` | BlueTTS, `config/` (bez zmian, do porównań) | jak wyżej |
+| `train_autoencoder.py`, `dataset.py`, `bluecodec/` | `github.com/maxmelichov/blue-codec` (`src/bluecodec` → `bluecodec`) | `aaf9f54dc06356e5d6292a50385ed4b18bb7be97` |
+| `docs/` | dokumentacja obu repozytoriów (opisuje oryginał 44,1 kHz z fonemami) | jak wyżej |
+
+Nie skopiowano: inferencji ONNX i PyTorch (`src/`), eksportu (`exports/`), gotowych głosów, testów,
+skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co leży w `training/rl/`.
+
+## Nasze zmiany względem oryginału
+
+- **Słownik znaków** (`training/data/text_vocab.py`): surowy polski tekst zamiast fonemów IPA, z zachowaniem
+  wielkich liter; normalizacja NFC i ujednolicenie cudzysłowów, myślników i odstępów.
+- **Częstotliwość próbkowania z konfiguracji** zamiast 44100 wpisanego na sztywno: `training/t2l/sampling.py`
+  (`set_audio_format`), `training/t2l/train_loop.py`, `training/dp/trainer.py`, `training/dp/data_module.py`.
+- **Limity długości klipów z konfiguracji** (sekcja `data`: `max_wav_sec`, `max_text_len`) zamiast 20 s
+  i 300 znaków na sztywno.
+- **Punkty kontrolne modelu tekst→latenty**: odstęp i liczba trzymanych plików z konfiguracji
+  (`ttl.train.save_every`, `ttl.train.keep_checkpoints`); oryginał zapisywał co 1000 kroków i nic nie usuwał.
+- **Zdania próbne z konfiguracji** (`eval_phrases`), bez espeak.
+- **Predyktor długości w próbkach treningowych** budowany z sekcji `dp` konfiguracji (`--dp_checkpoint`),
+  a nie z wartości domyślnych i stałej ścieżki.
+- **Pliki FLAC**: ścieżki z rozszerzeniem `.flac` nie dostają już dopisanego `.wav`.
+- **Importy**: wszystko uruchamia się z katalogu `trening/` jako `python -m training...`.
+- **Kodek**: próbka odsłuchowa wczytywana przez `soundfile` (bez `torchcodec` i `ffmpeg`).

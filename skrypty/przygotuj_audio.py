@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Przygotowuje dane do treningu: pliki FLAC na dysku, podział train/val i listy dla kodeka.
+"""Przygotowuje dane do treningu: pliki FLAC na dysku, podział train/val, listy i konfigurację.
 
 Źródło audio (pierwsze, które istnieje):
-  1. `wyniki/poziomka/audio/` + `manifest.jsonl` — jeśli pliki po syntezie jeszcze leżą, są użyte w miejscu;
-  2. pliki parquet (`wyniki/poziomka_parquet/data/`, albo pobrane z HF przez --repo) — klipy są wypakowywane
+  1. `dane/metadane.jsonl` z wcześniejszego uruchomienia — pliki już są, powstają tylko listy na nowo;
+  2. `wyniki/poziomka/audio/` + `manifest.jsonl` — jeśli pliki po syntezie jeszcze leżą, są użyte w miejscu;
+  3. pliki parquet (`wyniki/poziomka_parquet/data/`, albo pobrane z HF przez --repo) — klipy są wypakowywane
      do `dane/audio/` (ok. 61 GB; wznawialne: istniejące pliki są pomijane).
 
 Wynik w `dane/`:
-  metadane.jsonl     jeden wiersz na klip: id, sciezka (bezwzględna), tekst, sekundy, zrodlo_id, podzial, ...
-  kodek_train.txt    ścieżki klipów treningowych (dla blue-codec)
-  kodek_val.txt      ścieżki klipów walidacyjnych
-  kodek_48k.json     konfiguracja kodeka z `trening/kodek_48k.json` z wpisanymi ścieżkami
+  metadane.jsonl      jeden wiersz na klip: id, sciezka (bezwzględna), tekst, sekundy, zrodlo_id, podzial, ...
+  kodek_train.txt     ścieżki klipów treningowych (dla kodeka)
+  kodek_val.txt       ścieżki klipów walidacyjnych
+  bluetts_train.csv   klipy treningowe z tekstem (dla modelu tekst->latenty i predyktora długości)
+  bluetts_val.csv     to samo dla walidacji
+  polski_100m.json    konfiguracja z `trening/config/polski_100m.json` z wpisanymi ścieżkami
 
 Walidacja to całe rozmowy (`zrodlo_id`), nie pojedyncze klipy, więc żaden tekst z walidacji nie jest w treningu.
 
@@ -22,6 +25,7 @@ Przykłady:
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import sys
@@ -44,6 +48,18 @@ def z_plikow(wyniki: Path) -> list[dict]:
     brak = [w["sciezka"] for w in wiersze if not Path(w["sciezka"]).is_file()]
     if brak:
         sys.exit(f"W {wyniki} brakuje {len(brak)} plików z manifestu (np. {brak[0]}). Usuń katalog audio albo użyj parquet (--parquet).")
+    return wiersze
+
+
+def z_metadanych(metadane: Path) -> list[dict] | None:
+    """Klipy z wcześniejszego uruchomienia, jeśli plik metadanych istnieje i wszystkie pliki audio są na miejscu."""
+    if not metadane.is_file():
+        return None
+    wiersze = [json.loads(w) for w in metadane.open(encoding="utf-8") if w.strip()]
+    brak = sum(1 for w in wiersze if not Path(w["sciezka"]).is_file())
+    if not wiersze or brak:
+        print(f"{metadane}: brakuje {brak} z {len(wiersze)} plików audio — przygotowuję dane od nowa.")
+        return None
     return wiersze
 
 
@@ -82,14 +98,17 @@ def main() -> None:
     p.add_argument("--repo", help="dataset na HF do pobrania, gdy parquet nie ma lokalnie")
     p.add_argument("--dane", default=str(KATALOG_PROJEKTU / "dane"), help="katalog wynikowy")
     p.add_argument("--rozmow-val", type=int, default=300, help="ile całych rozmów odłożyć do walidacji")
-    p.add_argument("--szablon", default=str(KATALOG_PROJEKTU / "trening" / "kodek_48k.json"))
+    p.add_argument("--szablon", default=str(KATALOG_PROJEKTU / "trening" / "config" / "polski_100m.json"))
     args = p.parse_args()
 
     wyniki, dane = Path(args.wyniki), Path(args.dane)
     dane.mkdir(parents=True, exist_ok=True)
     parquet = Path(args.parquet) if args.parquet else wyniki.with_name(wyniki.name + "_parquet") / "data"
 
-    if (wyniki / "manifest.jsonl").is_file() and (wyniki / "audio").is_dir() and any((wyniki / "audio").iterdir()):
+    wiersze = z_metadanych(dane / "metadane.jsonl")
+    if wiersze is not None:
+        print(f"Używam klipów z {dane / 'metadane.jsonl'} ({len(wiersze)}); audio bez zmian.")
+    elif (wyniki / "manifest.jsonl").is_file() and (wyniki / "audio").is_dir() and any((wyniki / "audio").iterdir()):
         print(f"Audio po syntezie leży w {wyniki / 'audio'} — używam w miejscu, bez kopiowania.")
         wiersze = z_plikow(wyniki)
     else:
@@ -123,15 +142,25 @@ def main() -> None:
             "".join(w["sciezka"] + "\n" for w in wiersze if w["podzial"] == podzial), encoding="utf-8"
         )
 
+    # Format, którego oczekuje trener BlueTTS. Wszystkie pola w cudzysłowach, żeby przecinki i cudzysłowy
+    # w tekście nie zmyliły wykrywania separatora. "phonemized" = True wyłącza espeak: tekst idzie surowy.
+    for podzial in ("train", "val"):
+        with (dane / f"bluetts_{podzial}.csv").open("w", encoding="utf-8", newline="") as plik:
+            zapis = csv.writer(plik, quoting=csv.QUOTE_ALL)
+            zapis.writerow(["filename", "whisper_phonemes", "speaker_id", "wer_score", "lang", "phonemized"])
+            for w in wiersze:
+                if w["podzial"] == podzial:
+                    zapis.writerow([w["sciezka"], w["tekst"], 1, 0.0, "pl", True])
+
     konfiguracja = json.loads(Path(args.szablon).read_text(encoding="utf-8"))
     konfiguracja["ae"]["data"]["train_metadata"] = [str((dane / "kodek_train.txt").resolve())]
     konfiguracja["ae"]["data"]["val_metadata"] = str((dane / "kodek_val.txt").resolve())
-    (dane / "kodek_48k.json").write_text(json.dumps(konfiguracja, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    (dane / "polski_100m.json").write_text(json.dumps(konfiguracja, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     for podzial in ("train", "val"):
         czesc = [w for w in wiersze if w["podzial"] == podzial]
         print(f"{podzial}: {len(czesc)} klipów, {sum(w['sekundy'] for w in czesc) / 3600:.1f} h, {len({w['zrodlo_id'] for w in czesc})} rozmów")
-    print(f"Zapisano: {dane / 'metadane.jsonl'}, {dane / 'kodek_train.txt'}, {dane / 'kodek_val.txt'}, {dane / 'kodek_48k.json'}")
+    print(f"Zapisano w {dane}: metadane.jsonl, kodek_train.txt, kodek_val.txt, bluetts_train.csv, bluetts_val.csv, polski_100m.json")
 
 
 if __name__ == "__main__":
