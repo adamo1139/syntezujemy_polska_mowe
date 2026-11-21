@@ -76,19 +76,20 @@ Pełny trening na 6 kartach:
 ```bash
 CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 train_autoencoder.py \
   --arch_config ../dane/polski_100m.json --checkpoint_dir ../modele/kodek_48k \
-  --total_steps 300000 --eval_input ../glosy/poziomka_dluga.wav
+  --total_steps 100000 --eval_input ../glosy/poziomka_dluga.wav --eval_every 2000
 ```
 
 - **Wznowienie:** to samo polecenie z `--resume ../modele/kodek_48k/ae_latest.pt`.
 - **Trening rozpoczęty wcześniej z klonu `zewn/blue-codec`** jest z tym zgodny: ta sama architektura
   i format punktów kontrolnych, więc można go dokończyć tam albo wznowić stąd.
-- **Liczba kroków jest szacunkiem.** Oryginał to 1,5 mln kroków przy partii 128 na wielu mówcach; tu jest
-  jeden głos i partia 384 (6 × 64). Harmonogram uczenia jest rozpisany na `--total_steps`, więc liczbę
-  trzeba ustalić przed startem.
-- **Ocena:** co 10 tys. kroków w `modele/kodek_48k/eval/` ląduje rekonstrukcja `poziomka_dluga.wav`;
-  odsłuch obok oryginału jest ważniejszy niż wartości strat.
+- **Liczba kroków jest szacunkiem** (decyzja 2026-11-21: 100 tys.). To ok. 256 przejść przez wszystkie klipy
+  i ok. 9 h przy 3 krokach/s (zmierzone na jednej karcie: 3 kroki/s, 12,9 GB VRAM przy partii 64).
+  Harmonogram uczenia jest rozpisany na `--total_steps`; przedłużenie: `--resume` z `--continue_cosine`.
+- **Ocena:** co 2000 kroków (`--eval_every`) w `modele/kodek_48k/eval/` ląduje rekonstrukcja
+  `poziomka_dluga.wav`; odsłuch obok oryginału jest ważniejszy niż wartości strat. Próbka to ułamek sekundy
+  pracy jednej karty i nie zależy od zapisu punktów kontrolnych (te nadal co 10 tys. kroków).
 - **TensorBoard:** trener sam go uruchamia na porcie 8000 z dostępem z sieci (`--bind_all`).
-- **Miejsce:** punkt kontrolny ma ok. 0,74 GB i trener ich nie sprząta; 300 tys. kroków to ok. 22 GB.
+- **Miejsce:** punkt kontrolny ma ok. 0,74 GB i trener ich nie sprząta; 100 tys. kroków to ok. 8 GB.
 
 ## 3. Statystyki latentów
 

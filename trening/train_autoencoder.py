@@ -430,6 +430,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--resume', type=str, default=None, help='Training checkpoint (.pt) to resume from')
     parser.add_argument('--eval_input', type=str, default=None, help='Audio file reconstructed into <checkpoint_dir>/eval at every save')
+    parser.add_argument('--eval_every', type=int, default=None, help='Reconstruct --eval_input every N steps (default: ae.train.save_interval)')
     parser.add_argument('--arch_config', type=str, default='config/tts.json', help='Model and data config')
     parser.add_argument('--local-rank', type=int, default=0)
     parser.add_argument('--seed', type=int, default=1234)
@@ -662,6 +663,8 @@ def main():
                 pbar.set_postfix({"Step": step, "G": f"{g_meter.avg:.4f}", "D": f"{d_meter.avg:.4f}", "Mel": f"{mel_meter.avg:.4f}", "LR": f"{lr_sched.get_last_lr()[0]:.2e}"})
                 if step % train_cfg['save_interval'] == 0:
                     save(step); last_saved = step
+                # próbka odsłuchowa niezależnie od zapisu punktu kontrolnego (--eval_every; domyślnie razem z zapisem)
+                if step % (args.eval_every or train_cfg['save_interval']) == 0:
                     if args.eval_input:
                         evaluate(enc_ema, dec_ema, mel_transform_input, args.eval_input, os.path.join(ckpt_dir, "eval"), step, device,
                                  data_cfg['sample_rate'], args.local_rank, keep_decoder_eval=args.encoder_only)
