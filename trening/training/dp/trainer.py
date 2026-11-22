@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import json
 import random
@@ -104,6 +105,8 @@ def train_duration_predictor(
     lr: float = 1e-4,
     device: str = "cuda:1" if torch.cuda.is_available() else "cpu",
     num_workers: int = 4,
+    init_checkpoint: str | None = None,
+    start_step: int = 0,
 ):
     # Wiele kart: uruchomienie przez torchrun (zmienne RANK/WORLD_SIZE) -> jedna karta na proces, DDP.
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
@@ -150,6 +153,11 @@ def train_duration_predictor(
         edge_fill=dp_cfg.get("edge_fill", False),
     )
     
+    if init_checkpoint:
+        # dotrenowanie: wagi z punktu kontrolnego (np. WSM), optymalizator od nowa; numeracja kroków od start_step
+        model.load_state_dict(torch.load(init_checkpoint, map_location=device))
+        if main_proc:
+            print(f"[DP] wagi z {init_checkpoint}; kroki od {start_step} do {max_steps}")
     if distributed:
         model = DDP(model, device_ids=[int(os.environ["LOCAL_RANK"])] if torch.cuda.is_available() else None)
     optimizer = AdamW(model.parameters(), lr=lr)
@@ -178,7 +186,7 @@ def train_duration_predictor(
         print(f"Warning: stats channels ({mean.shape[1]}) != expected compressed_channels ({compressed_channels}).")
     print(check_stats_provenance(stats, ae_encoder.state_dict()))
         
-    global_step = 0
+    global_step = start_step
     mean_loss = 0.0
     print("Starting DP training loop...")
     while global_step < max_steps:
@@ -280,7 +288,7 @@ def train_duration_predictor(
             optimizer.step()
             global_step += 1
             mean_loss += loss.item()
-            progress_bar.set_postfix(loss=mean_loss / (global_step + 1), global_step=global_step)
+            progress_bar.set_postfix(loss=mean_loss / (global_step - start_step), global_step=global_step)
             if global_step % 500 == 0 and main_proc:
                 save_path = os.path.join(checkpoint_dir, f"duration_predictor_{global_step}.pt")
                 torch.save((model.module if distributed else model).state_dict(), save_path)

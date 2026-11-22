@@ -62,3 +62,4 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **Model tekst→latenty**: strata walidacyjna (`--val_data`, `training/t2l/walidacja.py`, co `val_every`) i kamienie
   milowe co `milestone_every` kroków w `kamienie/`.
 - **`usrednij_dp.py`**: ocena osobno dla klipów z cyframi i bez (z odchyleniem ze znakiem); bez `--wyjscie` tylko ocena.
+- **Predyktor długości**: dotrenowanie z istniejących wag (`--init`, `--start_step`).

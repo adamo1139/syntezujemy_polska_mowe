@@ -20,7 +20,13 @@ def main():
     parser.add_argument("--ae_checkpoint", type=str, default="checkpoints/ae/blue_codec.safetensors")
     parser.add_argument("--stats_path", type=str, default="stats_multilingual.pt")
     parser.add_argument("--num_workers", type=int, default=4, help="data-loading processes per GPU")
+    parser.add_argument("--init", type=str, default=None,
+                        help="dotrenowanie: wagi startowe z tego punktu kontrolnego (optymalizator od nowa)")
+    parser.add_argument("--start_step", type=int, default=0,
+                        help="numer kroku, od którego liczyć przy --init (np. 6000); --max_steps to krok końcowy")
     args = parser.parse_args()
+    if args.start_step >= args.max_steps:
+        parser.error("--max_steps to krok końcowy i musi być większy niż --start_step")
     
     train_duration_predictor(
         metadata_path=args.data,
@@ -33,6 +39,8 @@ def main():
         ae_checkpoint=args.ae_checkpoint,
         stats_path=args.stats_path,
         num_workers=args.num_workers,
+        init_checkpoint=args.init,
+        start_step=args.start_step,
     )
 
 if __name__ == "__main__":

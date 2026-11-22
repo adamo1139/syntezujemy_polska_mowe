@@ -269,15 +269,17 @@ python policz_latenty.py --metadata ../dane/bluetts_train.csv ../dane/bluetts_va
 Statystyki latentów (`stats.pt`) zostają: liczone tym samym kodekiem na 367 h, 60 h mowy tego samego głosu ich
 nie zmieni.
 
-Predyktor długości od nowa na całości (stary zaniżał długość tekstów z cyframi: „2026” to 4 znaki, a ok. 2 s
-mowy), na karcie 4, do osobnego katalogu; najpierw ocena starego dla porównania:
+Predyktor długości: dotrenowanie obecnego (WSM) o kolejne 6000 kroków na całości (stary zaniżał długość
+tekstów z cyframi: „2026” to 4 znaki, a ok. 2 s mowy). Na karcie 4, do osobnego katalogu; wagi startowe z WSM,
+optymalizator od nowa, kroki numerowane dalej (6500 … 12000). Najpierw ocena starego dla porównania:
 
 ```bash
 python usrednij_dp.py --punkty ../modele/dp/duration_predictor_wsm.pt --device cuda:4
 python -m training.dp.cli --config ../dane/polski_100m.json --data ../dane/bluetts_train.csv \
   --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --stats_path ../modele/stats.pt \
-  --out ../modele/dp_v2 --max_steps 6000 --batch_size 64 --num_workers 3 --device cuda:4
-python usrednij_dp.py --punkty ../modele/dp_v2/duration_predictor_{4500,5000,5500,6000}.pt \
+  --init ../modele/dp/duration_predictor_wsm.pt --start_step 6000 --max_steps 12000 \
+  --out ../modele/dp_v2 --batch_size 96 --num_workers 6 --device cuda:4
+python usrednij_dp.py --punkty ../modele/dp_v2/duration_predictor_{10500,11000,11500,12000}.pt \
   --wyjscie ../modele/dp_v2/duration_predictor_wsm.pt --device cuda:4
 ```
 
