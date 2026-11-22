@@ -914,7 +914,9 @@ def train(
 
             final_mask = latent_mask_exp * target_loss_mask_exp
             mask_ct = final_mask.expand(-1, C, -1)
-            if rsf_enabled and global_step >= rsf_start_step:
+            # zapamiętane przed krokiem optymalizatora: po nim global_step jest już o 1 większy
+            rsf_w_kroku = rsf_enabled and global_step >= rsf_start_step
+            if rsf_w_kroku:
                 if rsf_z_sil is None:
                     rsf_z_sil = silence_latent(ae_encoder, mel_spec, mean, std, normalizer_scale,
                                                chunk_compress_factor, ae_sample_rate, device)
@@ -975,7 +977,7 @@ def train(
             _extra = {}
             if spfm_out.ran_spfm:
                 _extra["spfm/dirty_rate_partii"] = spfm_out.dirty_count / max(B, 1)
-            if rsf_enabled and global_step >= rsf_start_step:
+            if rsf_w_kroku:
                 _extra["train/rsf_rand"] = float(rsf_rand); _extra["train/rsf_aug"] = float(rsf_aug)
             metryki.krok(global_step, loss_val, scheduler.get_last_lr()[0], B, Ke, T, text_ids.shape[1], z_ref.shape[2],
                          _klatki, _klatki * hop_length * chunk_compress_factor / ae_sample_rate, spfm_out.ran_spfm, _extra)
