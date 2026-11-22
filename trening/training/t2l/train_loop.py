@@ -149,7 +149,7 @@ def train(
     log_every: int = 10,
     compile_vf: bool = False,
     profile_kernels: int = 0,
-    val_data: Optional[str] = None,
+    val_data=None,   # ścieżka CSV albo lista; pierwsza = „val”, kolejne = „val_<nazwa>” (bluetts_val_<nazwa>.csv)
 ):
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         dist.init_process_group("nccl" if torch.cuda.is_available() else "gloo")   # gloo: próby na CPU
@@ -497,21 +497,25 @@ def train(
         if rank == 0:
             print(f"[latenty] gotowe latenty z {latents_dir} (enkoder {_fp}); kodek nie liczy ich w kroku")
 
-    walidacja = None
+    walidacje = []   # [(prefiks metryk, Walidacja)]
     if val_data:
         from training.t2l.walidacja import Walidacja
         if avg_every > 0 and val_every % avg_every != 0:
             raise SystemExit(f"ttl.train.val_every ({val_every}) musi być wielokrotnością --avg_every ({avg_every}): "
                              "walidacja liczy się wtedy, gdy wagi kart są właśnie uśrednione")
-        walidacja = Walidacja(
-            val_data, dict(sample_rate=ae_sample_rate, max_wav_len=int(ae_sample_rate * max_wav_sec),
-                           max_text_len=max_text_len, affricate_ligatures=affricate_ligatures, lang_tags=lang_tags,
-                           latents_dir=latents_dir),
-            rank, dist.get_world_size() if dist.is_initialized() else 1, device,
-            batch_seconds=2 * (batch_seconds or 160.0), max_batch=max_batch)
-        if rank == 0:
-            print(f"[walidacja] {walidacja.n_klipow} klipów ({walidacja.sekundy / 3600:.2f} h) z {val_data}, "
-                  f"co {val_every} kroków; {len(walidacja.partie)} partii na kartę")
+        for _nr, _sciezka in enumerate([val_data] if isinstance(val_data, str) else list(val_data)):
+            _stem = os.path.splitext(os.path.basename(_sciezka))[0]
+            _prefiks = "val" if _nr == 0 else "val_" + (_stem.split("val_", 1)[1] if "val_" in _stem else _stem)
+            _w = Walidacja(
+                _sciezka, dict(sample_rate=ae_sample_rate, max_wav_len=int(ae_sample_rate * max_wav_sec),
+                               max_text_len=max_text_len, affricate_ligatures=affricate_ligatures, lang_tags=lang_tags,
+                               latents_dir=latents_dir),
+                rank, dist.get_world_size() if dist.is_initialized() else 1, device,
+                batch_seconds=2 * (batch_seconds or 160.0), max_batch=max_batch, prefiks=_prefiks)
+            walidacje.append((_prefiks, _w))
+            if rank == 0:
+                print(f"[walidacja] {_prefiks}: {_w.n_klipow} klipów ({_w.sekundy / 3600:.2f} h) z {_sciezka}, "
+                      f"co {val_every} kroków; {len(_w.partie)} partii na kartę")
 
     # Sampler Setup
     if "sample_weight" in dataset.df.columns:
@@ -992,22 +996,24 @@ def train(
             progress_bar.set_postfix(**postfix)
 
             # strata walidacyjna (wszystkie karty naraz; wagi właśnie uśrednione, bo val_every % avg_every == 0)
-            if walidacja is not None and global_step % val_every == 0 and global_step != last_val_step:
+            if walidacje and global_step % val_every == 0 and global_step != last_val_step:
                 last_val_step = global_step
-                _t0 = time.time()
-                _w = walidacja((unwrap_ddp(text_encoder), unwrap_ddp(reference_encoder), unwrap_ddp(vf_estimator)),
-                               _przygotuj_walidacje, _val_amp, sigma_min, _val_tile)
-                if rank == 0:
-                    print(f"\n[walidacja] krok {global_step}: val/loss {_w['val/loss']:.4f} | "
-                          + " ".join(f"t{k[-3:]} {v:.4f}" for k, v in _w.items() if k != "val/loss")
-                          + f" | {time.time() - _t0:.0f} s")
-                    metryki.loguj(_w, global_step)
-                    _plik = os.path.join(checkpoint_dir, "walidacja.csv")
-                    _nowy = not os.path.exists(_plik)
-                    with open(_plik, "a", encoding="utf-8") as _f:
-                        if _nowy:
-                            _f.write("krok," + ",".join(_w) + "\n")
-                        _f.write(f"{global_step}," + ",".join(f"{v:.6f}" for v in _w.values()) + "\n")
+                for _prefiks, walidacja in walidacje:
+                    _t0 = time.time()
+                    _w = walidacja((unwrap_ddp(text_encoder), unwrap_ddp(reference_encoder), unwrap_ddp(vf_estimator)),
+                                   _przygotuj_walidacje, _val_amp, sigma_min, _val_tile)
+                    if rank == 0:
+                        _k = f"{_prefiks}/loss"
+                        print(f"\n[walidacja] krok {global_step}: {_k} {_w[_k]:.4f} | "
+                              + " ".join(f"t{k[-3:]} {v:.4f}" for k, v in _w.items() if k != _k)
+                              + f" | {time.time() - _t0:.0f} s")
+                        metryki.loguj(_w, global_step)
+                        _plik = os.path.join(checkpoint_dir, "walidacja.csv" if _prefiks == "val" else f"walidacja_{_prefiks[4:]}.csv")
+                        _nowy = not os.path.exists(_plik)
+                        with open(_plik, "a", encoding="utf-8") as _f:
+                            if _nowy:
+                                _f.write("krok," + ",".join(_w) + "\n")
+                            _f.write(f"{global_step}," + ",".join(f"{v:.6f}" for v in _w.values()) + "\n")
 
             # under accumulation global_step stays on a multiple of 1000 for several micro-batches: save once
             # ckpt_latest.pt: ten sam stan co zwykły punkt kontrolny, nadpisywany co latest_every kroków (bez próbek

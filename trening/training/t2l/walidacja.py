@@ -28,8 +28,10 @@ PUNKTY_T = (0.1, 0.3, 0.5, 0.7, 0.9)
 
 
 class Walidacja:
-    def __init__(self, sciezka, dataset_kwargs, rank, world, device, batch_seconds, max_batch=64, seed=20261122):
+    def __init__(self, sciezka, dataset_kwargs, rank, world, device, batch_seconds, max_batch=64, seed=20261122,
+                 prefiks="val"):
         self.rank, self.world, self.device, self.seed = rank, world, device, seed
+        self.prefiks = prefiks   # klucze metryk: <prefiks>/loss, <prefiks>/loss_t0.1 …
         self.ds = Text2LatentDataset(sciezka, **dataset_kwargs)
         dl = self.ds.durations()
         kolejnosc = sorted(range(len(self.ds)), key=lambda i: (dl[i], i))
@@ -94,7 +96,7 @@ class Walidacja:
             dist.all_reduce(sumy)
         K = len(PUNKTY_T)
         per_t = (sumy[:K] / sumy[K:].clamp(min=1)).tolist()
-        wynik = {"val/loss": float(sumy[:K].sum() / sumy[K:].sum().clamp(min=1))}
+        wynik = {f"{self.prefiks}/loss": float(sumy[:K].sum() / sumy[K:].sum().clamp(min=1))}
         for tt, w in zip(PUNKTY_T, per_t):
-            wynik[f"val/loss_t{tt:.1f}"] = w
+            wynik[f"{self.prefiks}/loss_t{tt:.1f}"] = w
         return wynik

@@ -21,10 +21,15 @@ Dodatkowe syntezy (--dodaj KATALOG, można powtórzyć; katalog z manifest.jsonl
 trafiają w całości do treningu, a podział istniejących klipów z `dane/metadane.jsonl` zostaje bez zmian,
 więc walidacja jest dalej ta sama.
 
+Dodatkowe zbiory walidacyjne (--dodaj-val NAZWA=KATALOG, np. liczby=wyniki/poziomka_val_liczby): klipy dostają
+podział „val_NAZWA” i trafiają tylko do `bluetts_val_NAZWA.csv` (nie do treningu ani do list kodeka). Ich rozmowy
+nie mogą występować w żadnym innym podziale.
+
 Przykłady:
   python skrypty/przygotuj_audio.py
   python skrypty/przygotuj_audio.py --repo HoldForQuake/VoxCPM2-pol-one-voice-367h
   python skrypty/przygotuj_audio.py --dodaj wyniki/poziomka_liczby
+  python skrypty/przygotuj_audio.py --dodaj-val liczby=wyniki/poziomka_val_liczby
 """
 
 from __future__ import annotations
@@ -105,6 +110,8 @@ def main() -> None:
     p.add_argument("--rozmow-val", type=int, default=300, help="ile całych rozmów odłożyć do walidacji")
     p.add_argument("--szablon", default=str(KATALOG_PROJEKTU / "trening" / "config" / "polski_100m.json"))
     p.add_argument("--dodaj", action="append", default=[], help="katalog dodatkowej syntezy (manifest.jsonl + audio/), tylko do treningu")
+    p.add_argument("--dodaj-val", action="append", default=[], metavar="NAZWA=KATALOG",
+                   help="dodatkowy zbiór walidacyjny: klipy z KATALOG -> dane/bluetts_val_NAZWA.csv")
     args = p.parse_args()
 
     wyniki, dane = Path(args.wyniki), Path(args.dane)
@@ -134,12 +141,12 @@ def main() -> None:
 
     # Walidacja: rozmowy o najmniejszym skrócie zrodlo_id — stały, niezależny od kolejności wybór.
     # Klipy z wcześniejszych metadanych zachowują swój podział (dodanie danych nie przesuwa walidacji).
-    if not all(w.get("podzial") in ("train", "val") for w in wiersze):
+    if not all(w.get("podzial") in ("train", "val") or str(w.get("podzial", "")).startswith("val_") for w in wiersze):
         rozmowy = sorted({str(w["zrodlo_id"]) for w in wiersze}, key=lambda z: hashlib.sha1(z.encode()).hexdigest())
         walidacyjne = set(rozmowy[: args.rozmow_val])
         for w in wiersze:
             w["podzial"] = "val" if str(w["zrodlo_id"]) in walidacyjne else "train"
-    rozmowy_val = {str(w["zrodlo_id"]) for w in wiersze if w["podzial"] == "val"}
+    rozmowy_val = {str(w["zrodlo_id"]) for w in wiersze if w["podzial"] != "train"}
 
     znane = set(identyfikatory)
     for katalog in args.dodaj:
@@ -152,7 +159,22 @@ def main() -> None:
             znane.add(w["id"])
         wiersze += nowe
         print(f"Dodane z {katalog}: {len(nowe)} klipów, {sum(w['sekundy'] for w in nowe) / 3600:.1f} h (trening)")
+    for wpis in args.dodaj_val:
+        nazwa, _, katalog = wpis.partition("=")
+        if not nazwa or not katalog or not nazwa.replace("_", "").isalnum():
+            sys.exit(f"--dodaj-val {wpis!r}: oczekiwane NAZWA=KATALOG (nazwa z liter, cyfr i _)")
+        nowe = [w for w in z_plikow(Path(katalog)) if w["id"] not in znane]
+        zajete = {str(w["zrodlo_id"]) for w in wiersze}
+        kolizje = sum(1 for w in nowe if str(w["zrodlo_id"]) in zajete)
+        if kolizje:
+            sys.exit(f"{katalog}: {kolizje} klipów z rozmów, które już są w danych — wybierz teksty z --pomin wszystkich wcześniejszych wyborów")
+        for w in nowe:
+            w["podzial"] = f"val_{nazwa}"
+            znane.add(w["id"])
+        wiersze += nowe
+        print(f"Dodane z {katalog}: {len(nowe)} klipów, {sum(w['sekundy'] for w in nowe) / 3600:.1f} h (walidacja val_{nazwa})")
     wiersze.sort(key=lambda w: w["id"])
+    podzialy = ["train", "val"] + sorted({w["podzial"] for w in wiersze} - {"train", "val"})
 
     with (dane / "metadane.jsonl").open("w", encoding="utf-8") as plik:
         for w in wiersze:
@@ -165,7 +187,7 @@ def main() -> None:
 
     # Format, którego oczekuje trener BlueTTS. Wszystkie pola w cudzysłowach, żeby przecinki i cudzysłowy
     # w tekście nie zmyliły wykrywania separatora. "phonemized" = True wyłącza espeak: tekst idzie surowy.
-    for podzial in ("train", "val"):
+    for podzial in podzialy:
         with (dane / f"bluetts_{podzial}.csv").open("w", encoding="utf-8", newline="") as plik:
             zapis = csv.writer(plik, quoting=csv.QUOTE_ALL)
             zapis.writerow(["filename", "whisper_phonemes", "speaker_id", "wer_score", "lang", "phonemized"])
@@ -178,10 +200,11 @@ def main() -> None:
     konfiguracja["ae"]["data"]["val_metadata"] = str((dane / "kodek_val.txt").resolve())
     (dane / "polski_100m.json").write_text(json.dumps(konfiguracja, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
-    for podzial in ("train", "val"):
+    for podzial in podzialy:
         czesc = [w for w in wiersze if w["podzial"] == podzial]
         print(f"{podzial}: {len(czesc)} klipów, {sum(w['sekundy'] for w in czesc) / 3600:.1f} h, {len({w['zrodlo_id'] for w in czesc})} rozmów")
-    print(f"Zapisano w {dane}: metadane.jsonl, kodek_train.txt, kodek_val.txt, bluetts_train.csv, bluetts_val.csv, polski_100m.json")
+    print(f"Zapisano w {dane}: metadane.jsonl, kodek_train.txt, kodek_val.txt, "
+          + ", ".join(f"bluetts_{p}.csv" for p in podzialy) + ", polski_100m.json")
 
 
 if __name__ == "__main__":

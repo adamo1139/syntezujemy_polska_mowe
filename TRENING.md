@@ -286,3 +286,37 @@ python usrednij_dp.py --punkty ../modele/dp_v2/duration_predictor_{10500,11000,1
 Ocena pokazuje osobno klipy z cyframi i bez; „odchylenie” ujemne = predyktor zaniża długość (mowa za szybka).
 Nowy predyktor do treningu modelu tekst→latenty (próbki co 5000 kroków): `--dp_checkpoint
 ../modele/dp_v2/duration_predictor_wsm.pt` przy restarcie; na sam model tekst→latenty nie wpływa.
+
+### 6a. Walidacja z liczbami
+
+Zwykła walidacja (`bluetts_val.csv`) ma tylko ok. 80 klipów z cyframi, więc obok niej jest osobny zbiór
+`bluetts_val_liczby.csv`: ok. 3 h szacunku tekstów z liczbami z rozmów, których nie ma ani w treningu, ani w
+dodatkowych 150 h (predyktor długości dotrenowany na nich by je znał). Trener liczy obie straty osobno
+(`val/loss` jak dotąd i `val_liczby/loss`, plik `../modele/t2l/walidacja_liczby.csv`).
+
+```bash
+# z katalogu repo, środowisko syntezy
+W="python skrypty/wybierz_teksty.py --fragmenty teksty/fragmenty_wszystkie.jsonl --czesci 1 --pomin teksty/wybrane.jsonl \
+  --pomin teksty/liczby_daty.jsonl --pomin teksty/liczby_matematyka.jsonl --pomin teksty/liczby_inne.jsonl"
+$W --wzorzec @daty --godziny 1 --wyjscie teksty/val_liczby_daty.jsonl
+$W --pomin teksty/val_liczby_daty.jsonl --wzorzec @matematyka --godziny 1 \
+  --temat matematyce --temat zagadkach --temat fizyce --temat inżynierii --temat "nauce i technice" --temat programowaniu \
+  --wyjscie teksty/val_liczby_matematyka.jsonl
+$W --pomin teksty/val_liczby_daty.jsonl --pomin teksty/val_liczby_matematyka.jsonl --wzorzec @liczby --godziny 1 \
+  --wyjscie teksty/val_liczby_inne.jsonl
+cat teksty/val_liczby_{daty,matematyka,inne}.jsonl > teksty/val_liczby.jsonl
+python skrypty/generuj.py --pomin 0 --teksty teksty/val_liczby.jsonl --wyjscie wyniki/poziomka_val_liczby --rownolegle 32
+python skrypty/przygotuj_audio.py --dodaj-val liczby=wyniki/poziomka_val_liczby
+```
+
+`przygotuj_audio.py` bierze resztę z `dane/metadane.jsonl` (z dodanymi wcześniej 150 h), więc `--dodaj` nie
+trzeba powtarzać. Potem z `trening/`: latenty dla wszystkich trzech list, ocena predyktorów na nowej walidacji
+i trening z dwiema walidacjami:
+
+```bash
+python policz_latenty.py --metadata ../dane/bluetts_train.csv ../dane/bluetts_val.csv ../dane/bluetts_val_liczby.csv \
+  --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --wyjscie ../dane/latenty --device cuda:1
+python usrednij_dp.py --punkty ../modele/dp/duration_predictor_wsm.pt ../modele/dp_v2/duration_predictor_wsm.pt \
+  --val ../dane/bluetts_val_liczby.csv --device cuda:1
+# w poleceniu treningu: --val_data ../dane/bluetts_val.csv ../dane/bluetts_val_liczby.csv
+```
