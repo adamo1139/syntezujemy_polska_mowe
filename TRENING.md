@@ -156,14 +156,26 @@ czasu kroku) i odmówi startu, jeśli latenty pochodzą z innego enkodera niż `
 
 ```bash
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+TORCHINDUCTOR_CACHE_DIR=/media/nvme_2tb/maked/audio/cache/inductor \
+TRITON_CACHE_DIR=/media/nvme_2tb/maked/audio/cache/triton \
 NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1 NCCL_CUMEM_HOST_ENABLE=0 \
 CUDA_VISIBLE_DEVICES=1,2,3,5,6,7 torchrun --nproc_per_node=6 -m training.t2l.cli \
   --config config/polski_100m.json --data ../dane/bluetts_train.csv \
   --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --stats_path ../modele/stats.pt \
   --dp_checkpoint ../modele/dp/duration_predictor_wsm.pt --out ../modele/t2l \
-  --max_steps 100000 --avg_every 50 --latents ../dane/latenty --inference_ref_wav ../glosy/poziomka_dluga.wav \
+  --max_steps 500000 --avg_every 50 --latents ../dane/latenty --inference_ref_wav ../glosy/poziomka_dluga.wav \
+  --val_data ../dane/bluetts_val.csv \
   --wandb mikolai --wandb_name t2l-100m --compile
 ```
+
+Strata walidacyjna (`--val_data`): co `ttl.train.val_every` (5000) kroków, na wszystkich klipach z
+`bluetts_val.csv` (300 rozmów spoza treningu), ze stałym szumem, stałymi wycinkami wzorca i punktami czasu
+t = 0,1…0,9, bez CFG, SPFM i RSF, więc liczby są porównywalne między krokami. Trafia do wandb (`val/loss`,
+`val/loss_t…`) i do `../modele/t2l/walidacja.csv`. Rośnie, gdy treningowa dalej spada → przeuczenie.
+
+Kamienie milowe: co `ttl.train.milestone_every` (50 000) kroków punkt kontrolny (z EMA) zostaje na stałe w
+`../modele/t2l/kamienie/` (twarde dowiązanie, `keep_checkpoints` go nie kasuje; ok. 1,5 GB każdy). Wycofanie:
+skopiuj wybrany do pustego katalogu i podaj go jako `--out` (albo przenieś nowsze punkty z `--out`).
 
 - **Wznowienie:** to samo polecenie; trener sam bierze najnowszy punkt z `--out`: `ckpt_step_*.pt` (co 5000
   kroków, z próbkami) albo `ckpt_latest.pt` (nadpisywany co 1000 kroków, `ttl.train.latest_every`), jeśli jest

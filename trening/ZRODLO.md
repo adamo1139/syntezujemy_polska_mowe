@@ -59,3 +59,5 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **Model tekst→latenty**: `training/t2l/metryki.py` (nasz): logowanie do wandb i szacunek MFU; zależność `wandb`.
 - **Model tekst→latenty**: `--compile` (torch.compile pola wektorowego, klucze punktów kontrolnych bez zmian) i
   `--profile_kernels N` (profiler PyTorcha na prawdziwych krokach); `profil_vf.py` do pomiaru samego pola wektorowego.
+- **Model tekst→latenty**: strata walidacyjna (`--val_data`, `training/t2l/walidacja.py`, co `val_every`) i kamienie
+  milowe co `milestone_every` kroków w `kamienie/`.

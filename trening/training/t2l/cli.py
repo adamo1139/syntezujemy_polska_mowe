@@ -56,6 +56,8 @@ def main():
     parser.add_argument("--peak_tflops", type=float, default=153.0,
                         help="szczytowa wydajność karty do MFU w TFLOPS (domyślnie 153)")
     parser.add_argument("--log_every", type=int, default=10, help="co ile kroków średnie metryki trafiają do wandb")
+    parser.add_argument("--val_data", type=str, default=None,
+                        help="CSV klipów spoza treningu (bluetts_val.csv): strata walidacyjna co ttl.train.val_every kroków")
     parser.add_argument("--compile", action="store_true", help="torch.compile(dynamic=True) pola wektorowego")
     parser.add_argument("--profile_kernels", type=int, default=0,
                         help="profiler PyTorcha na N krokach treningu (od 30.), tabela najdroższych kerneli i operacji")
@@ -88,6 +90,7 @@ def main():
         log_every=args.log_every,
         compile_vf=args.compile,
         profile_kernels=args.profile_kernels,
+        val_data=args.val_data,
     )
 
 if __name__ == "__main__":

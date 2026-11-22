@@ -65,6 +65,8 @@
       "weight_decay": 0.1,
       "ema_decay": 0.9999,
       "save_every": 5000,
+      "val_every": 5000,
+      "milestone_every": 50000,
       "keep_checkpoints": 6,
       "lr": 0.0005,
       "lr_schedule": "constant",
@@ -73,6 +75,7 @@
       "amp": "bf16",
       "batch_seconds": 160,
       "max_batch": 64,
+      "spfm_enabled": false,
       "spfm_start": 15000
     },
     "rsf": {
