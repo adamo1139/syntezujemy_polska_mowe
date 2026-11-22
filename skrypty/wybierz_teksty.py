@@ -11,9 +11,16 @@ Zasady wyboru (deterministyczne dla danego --ziarno):
   - każda rozmowa trafia w całości do jednej z --czesci części (pole „czesc”), a każda część ma
     ten sam rozkład tematów. Syntezę jednej części robi `generuj.py --czesc N`.
 
+Filtry (do dobierania danych o konkretnym charakterze, np. z liczbami):
+  --wzorzec REGEX   tylko fragmenty, w których jest dopasowanie (można powtórzyć: wystarczy jedno z nich);
+                    gotowe nazwy: @daty, @matematyka, @liczby;
+  --temat TEKST     tylko rozmowy, których temat zawiera ten tekst (można powtórzyć).
+
 Przykłady:
   python skrypty/wybierz_teksty.py                      # 500 h w 10 częściach po ok. 50 h
   python skrypty/wybierz_teksty.py --godziny 50 --czesci 1 --wyjscie teksty/maly.jsonl
+  python skrypty/wybierz_teksty.py --fragmenty teksty/fragmenty_wszystkie.jsonl --pomin teksty/wybrane.jsonl \
+    --wzorzec @daty --godziny 25 --czesci 1 --wyjscie teksty/liczby_daty.jsonl
 """
 
 from __future__ import annotations
@@ -28,6 +35,19 @@ from pathlib import Path
 KATALOG_PROJEKTU = Path(__file__).resolve().parent.parent
 ZNAKI_NA_SEKUNDE = 14.0
 
+_MIESIACE = "stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|września|października|listopada|grudnia"
+GOTOWE_WZORCE = {
+    # rok (1000–2099), data liczbowa, dzień z miesiącem, godzina, wiek rzymski, lata 90., „r.”
+    "@daty": (r"\b(1\d|20)\d\d\b|\b\d{1,2}\.\d{1,2}\.\d{2,4}\b|\b\d{1,2}\s+(" + _MIESIACE + r")\b"
+              r"|\b\d{1,2}:\d{2}\b|\b[XVI]{1,5}\s+(w\.|wiek)|\blat(ach|a)?\s+\d0\.?|\b\d{3,4}\s?r\."),
+    # działania i zapis liczbowy: 2 + 3, 3/4, 12,5, 40%, działania słownie przy liczbach
+    "@matematyka": (r"\d\s*[+/:]\s*\d|\d\s+-\s+\d|\b\d+,\d+\b|\d\s*%"
+                    r"|\d\s+(do\s+potęgi|razy|podzielić|plus|minus|procent)"
+                    # słowa, na które przygotuj_teksty.py zamienia symbole „=”, „×”, „²”, „√”, „≤” …
+                    r"|równa się|do kwadratu|do sześcianu|do potęgi|pierwiastek z|jest (mniejsze|większe)( lub równe)? od"),
+    "@liczby": r"\d",
+}
+
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -40,7 +60,11 @@ def main() -> None:
     p.add_argument("--odpowiedzi", type=int, default=2, help="tyle fragmentów odpowiedzi z rozmowy przy jednych odwiedzinach")
     p.add_argument("--pomin", action="append", default=[], help="plik .jsonl z wcześniejszym wyborem; jego rozmowy są pomijane")
     p.add_argument("--ziarno", type=int, default=0)
+    p.add_argument("--wzorzec", action="append", default=[], help="regex albo @daty/@matematyka/@liczby (patrz wyżej)")
+    p.add_argument("--temat", action="append", default=[], help="tylko tematy zawierające ten tekst")
     args = p.parse_args()
+    import re
+    wzorce = [re.compile(GOTOWE_WZORCE.get(w, w)) for w in args.wzorzec]
 
     fragmenty = Path(args.fragmenty)
     if not fragmenty.is_file():
@@ -55,8 +79,16 @@ def main() -> None:
     with fragmenty.open(encoding="utf-8") as plik:
         for wiersz in plik:
             fragment = json.loads(wiersz)
-            if fragment["zrodlo_id"] not in zajete_rozmowy:
-                rozmowy[fragment["zrodlo_id"]].append(fragment)
+            if fragment["zrodlo_id"] in zajete_rozmowy:
+                continue
+            if args.temat and not any(t in str(fragment.get("temat")) for t in args.temat):
+                continue
+            if wzorce and not any(w.search(fragment["tekst"]) for w in wzorce):
+                continue
+            rozmowy[fragment["zrodlo_id"]].append(fragment)
+    if wzorce or args.temat:
+        print(f"Po filtrach: {sum(map(len, rozmowy.values()))} fragmentów z {len(rozmowy)} rozmów, "
+              f"ok. {sum(f['znaki'] for r in rozmowy.values() for f in r) / ZNAKI_NA_SEKUNDE / 3600:.1f} h")
 
     los = random.Random(args.ziarno)
     # Dla każdej rozmowy: potasowane pytania i odpowiedzi, z których kolejne odwiedziny biorą po kilka.

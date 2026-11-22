@@ -17,9 +17,14 @@ Wynik w `dane/`:
 
 Walidacja to całe rozmowy (`zrodlo_id`), nie pojedyncze klipy, więc żaden tekst z walidacji nie jest w treningu.
 
+Dodatkowe syntezy (--dodaj KATALOG, można powtórzyć; katalog z manifest.jsonl i audio/ po generuj.py)
+trafiają w całości do treningu, a podział istniejących klipów z `dane/metadane.jsonl` zostaje bez zmian,
+więc walidacja jest dalej ta sama.
+
 Przykłady:
   python skrypty/przygotuj_audio.py
   python skrypty/przygotuj_audio.py --repo HoldForQuake/VoxCPM2-pol-one-voice-367h
+  python skrypty/przygotuj_audio.py --dodaj wyniki/poziomka_liczby
 """
 
 from __future__ import annotations
@@ -99,6 +104,7 @@ def main() -> None:
     p.add_argument("--dane", default=str(KATALOG_PROJEKTU / "dane"), help="katalog wynikowy")
     p.add_argument("--rozmow-val", type=int, default=300, help="ile całych rozmów odłożyć do walidacji")
     p.add_argument("--szablon", default=str(KATALOG_PROJEKTU / "trening" / "config" / "polski_100m.json"))
+    p.add_argument("--dodaj", action="append", default=[], help="katalog dodatkowej syntezy (manifest.jsonl + audio/), tylko do treningu")
     args = p.parse_args()
 
     wyniki, dane = Path(args.wyniki), Path(args.dane)
@@ -127,11 +133,26 @@ def main() -> None:
         sys.exit("Powtarzające się id klipów.")
 
     # Walidacja: rozmowy o najmniejszym skrócie zrodlo_id — stały, niezależny od kolejności wybór.
-    rozmowy = sorted({str(w["zrodlo_id"]) for w in wiersze}, key=lambda z: hashlib.sha1(z.encode()).hexdigest())
-    walidacyjne = set(rozmowy[: args.rozmow_val])
+    # Klipy z wcześniejszych metadanych zachowują swój podział (dodanie danych nie przesuwa walidacji).
+    if not all(w.get("podzial") in ("train", "val") for w in wiersze):
+        rozmowy = sorted({str(w["zrodlo_id"]) for w in wiersze}, key=lambda z: hashlib.sha1(z.encode()).hexdigest())
+        walidacyjne = set(rozmowy[: args.rozmow_val])
+        for w in wiersze:
+            w["podzial"] = "val" if str(w["zrodlo_id"]) in walidacyjne else "train"
+    rozmowy_val = {str(w["zrodlo_id"]) for w in wiersze if w["podzial"] == "val"}
+
+    znane = set(identyfikatory)
+    for katalog in args.dodaj:
+        nowe = [w for w in z_plikow(Path(katalog)) if w["id"] not in znane]
+        kolizje = sum(1 for w in nowe if str(w["zrodlo_id"]) in rozmowy_val)
+        if kolizje:
+            sys.exit(f"{katalog}: {kolizje} klipów z rozmów walidacyjnych — wybierz teksty z --pomin teksty/wybrane.jsonl")
+        for w in nowe:
+            w["podzial"] = "train"
+            znane.add(w["id"])
+        wiersze += nowe
+        print(f"Dodane z {katalog}: {len(nowe)} klipów, {sum(w['sekundy'] for w in nowe) / 3600:.1f} h (trening)")
     wiersze.sort(key=lambda w: w["id"])
-    for w in wiersze:
-        w["podzial"] = "val" if str(w["zrodlo_id"]) in walidacyjne else "train"
 
     with (dane / "metadane.jsonl").open("w", encoding="utf-8") as plik:
         for w in wiersze:

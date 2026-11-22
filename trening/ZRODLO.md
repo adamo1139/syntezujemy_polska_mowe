@@ -61,3 +61,4 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
   `--profile_kernels N` (profiler PyTorcha na prawdziwych krokach); `profil_vf.py` do pomiaru samego pola wektorowego.
 - **Model tekst→latenty**: strata walidacyjna (`--val_data`, `training/t2l/walidacja.py`, co `val_every`) i kamienie
   milowe co `milestone_every` kroków w `kamienie/`.
+- **`usrednij_dp.py`**: ocena osobno dla klipów z cyframi i bez (z odchyleniem ze znakiem); bez `--wyjscie` tylko ocena.

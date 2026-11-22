@@ -8,7 +8,9 @@ Kroki:
   4. czyszczenie markdownu i cięcie na fragmenty z całych zdań: mieszanka długości od ok. 1 s do 60 s;
   5. zapis `teksty/fragmenty.jsonl` (jeden fragment na wiersz) i statystyk.
 
-Tekst zostaje surowy (liczby, skróty) — tak go dostaje VoxCPM2, patrz PLAN.md.
+Tekst zostaje surowy (liczby, skróty) — tak go dostaje VoxCPM2, patrz PLAN.md. Wyjątek: symbole matematyczne
+spoza słownika modelu („=”, „×”, „≤”, „²”, „√” itd.) są zamieniane na słowa („równa się”, „razy”, …),
+zamiast odrzucać całe zdanie; patrz SYMBOLE_MATEMATYCZNE.
 Wybór podzbioru na konkretną liczbę godzin: skrypty/wybierz_teksty.py.
 
 Przykłady:
@@ -72,6 +74,26 @@ ETYKIETA_PUNKTU = re.compile(r"^\s*(\*\*|__)[^*_]{1,80}?:?(\*\*|__)\s*[:–—-]
 # Ślady po generowaniu rozmów, np. „Użytkownik pyta: …”.
 ARTEFAKT = re.compile(r"\b(Użytkownik|Asystent)\s*(pyta|odpowiada|mówi|pisze)?\s*:", re.IGNORECASE)
 ODNOSNIK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+# Symbole matematyczne spoza słownika modelu -> słowa (kolejność ma znaczenie: dłuższe najpierw).
+SYMBOLE_MATEMATYCZNE = [
+    (re.compile(r"\s*(!=|≠)\s*"), " jest różne od "),
+    (re.compile(r"(?<=[\w)])\s*(<=|≤)\s*(?=[\w(])"), " jest mniejsze lub równe "),
+    (re.compile(r"(?<=[\w)])\s*(>=|≥)\s*(?=[\w(])"), " jest większe lub równe "),
+    (re.compile(r"\s*(==|=)\s*"), " równa się "),
+    (re.compile(r"\s*≈\s*"), " w przybliżeniu "),
+    (re.compile(r"(?<=[\w)])\s+<\s+(?=[\w(])"), " jest mniejsze od "),
+    (re.compile(r"(?<=[\w)])\s+>\s+(?=[\w(])"), " jest większe od "),
+    (re.compile(r"\s*[×·⋅]\s*"), " razy "),
+    (re.compile(r"(?<=[\d)])\s*\*\s*(?=[\d(])"), " razy "),
+    (re.compile(r"\s*÷\s*"), " podzielić przez "),
+    (re.compile(r"\^2(?!\d)|²"), " do kwadratu"),
+    (re.compile(r"\^3(?!\d)|³"), " do sześcianu"),
+    (re.compile(r"\^\(?(\w+)\)?"), r" do potęgi \1"),
+    (re.compile(r"√\s*"), "pierwiastek z "),
+    (re.compile(r"\s*±\s*"), " plus minus "),
+    (re.compile(r"π"), "pi"),
+]
+
 ADRES = re.compile(r"(https?://|www\.)\S+", re.IGNORECASE)
 
 # Litery łacińskie (z polskimi i innymi znakami diakrytycznymi), cyfry i interpunkcja, którą da się przeczytać.
@@ -109,6 +131,8 @@ def oczysc_linie(linia: str) -> str | None:
     linia = re.sub(r"(?<!\w)_(?!\s)([^_]+?)(?<!\s)_(?!\w)", r"\1", linia)  # kursywa _..._
     linia = re.sub(r"`([^`]*)`", r"\1", linia)  # kod w linii
     linia = EMOJI.sub("", linia)
+    for wzorzec, slowa in SYMBOLE_MATEMATYCZNE:
+        linia = wzorzec.sub(slowa, linia)
     linia = linia.replace("“", "„").replace("«", "„").replace("»", "”").replace("‚", ",").replace("‘", "’")
     linia = linia.replace("−", "-").replace("‑", "-").replace("...", "…")
     linia = re.sub(r"\s+", " ", linia).strip()

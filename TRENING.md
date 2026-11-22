@@ -223,3 +223,64 @@ skopiuj wybrany do pustego katalogu i podaj go jako `--out` (albo przenieś nows
 - **Niewiadome:** partia 14 na kartę i 1 mln kroków to wartości oryginału dla wielu języków i mówców.
   Tempo, zajętość pamięci i to, po ilu krokach mowa staje się zrozumiała, wyjdzie dopiero na rigu.
   Harmonogram uczenia (połowienie po 400, 600 i 800 tys. kroków) jest w `ttl.train.lr_milestones`.
+
+## 6. Dodatkowe dane z liczbami, datami i matematyką (ok. 60 h)
+
+Liczby w zbiorze są rzadkie, więc model czyta je źle. Dosyntezowujemy ok. 60 h tekstów z liczbami (tym samym
+głosem i ustawieniami, cyfry w tekście jak dotąd) na wolnej karcie 4, a trening dalej chodzi na pozostałych.
+Teksty pochodzą z rozmów spoza dotychczasowego wyboru (`--pomin teksty/wybrane.jsonl`), więc walidacja
+zostaje nietknięta. Symbole spoza słownika modelu („=”, „×”, „·”, „²”, „√”, „≤”, „π” …) `przygotuj_teksty.py`
+zamienia na słowa („równa się”, „razy”, „do kwadratu”, …) zamiast odrzucać zdanie, więc równania zostają w
+danych; przy inferencji (przyszły `syntezuj.py`) tę samą zamianę trzeba zrobić przed modelem
+(`SYMBOLE_MATEMATYCZNE` w `przygotuj_teksty.py`). Kodek tego nie wymaga: widzi tylko dźwięk, a przeczytana liczba to zwykłe słowa.
+
+Z katalogu repo, w środowisku syntezy (`source .venv/bin/activate`):
+
+```bash
+# 1. fragmenty ze wszystkich rozmów datasetu (nie tylko górnych 10% jakości)
+python skrypty/przygotuj_teksty.py --percentyl 0 --wyjscie teksty/fragmenty_wszystkie.jsonl
+
+# 2. wybór: daty 25 h, matematyka 20 h, inne liczby 15 h (każdy pomija rozmowy poprzednich)
+W="python skrypty/wybierz_teksty.py --fragmenty teksty/fragmenty_wszystkie.jsonl --czesci 1 --pomin teksty/wybrane.jsonl"
+$W --wzorzec @daty --godziny 25 --wyjscie teksty/liczby_daty.jsonl
+$W --pomin teksty/liczby_daty.jsonl --wzorzec @matematyka --godziny 20 --wyjscie teksty/liczby_matematyka.jsonl
+$W --pomin teksty/liczby_daty.jsonl --pomin teksty/liczby_matematyka.jsonl --wzorzec @liczby --godziny 15 \
+  --wyjscie teksty/liczby_inne.jsonl
+cat teksty/liczby_daty.jsonl teksty/liczby_matematyka.jsonl teksty/liczby_inne.jsonl > teksty/liczby.jsonl
+
+# 3. synteza na karcie 4 (wznawialna tym samym poleceniem)
+python skrypty/generuj.py --karty 4 --teksty teksty/liczby.jsonl --wyjscie wyniki/poziomka_liczby --rownolegle 32
+
+# 4. dołączenie do danych treningowych (stary podział train/val bez zmian)
+python skrypty/przygotuj_audio.py --dodaj wyniki/poziomka_liczby
+```
+
+Szacunek godzin w `wybierz_teksty.py` liczy znaki, a cyfry czyta się dłużej niż wyglądają („2026” to ok.
+30 znaków mowy), więc nagrań wyjdzie trochę więcej niż 60 h (ok. 11 GB FLAC).
+
+Potem, w środowisku treningowym (`trening/`): latenty od nowa dla całości (stary plik zostaje do końca
+liczenia; potrzeba chwilowo ok. 6,5 GB więcej) i restart treningu z punktu 5 (wznowi z `ckpt_latest.pt`):
+
+```bash
+python policz_latenty.py --metadata ../dane/bluetts_train.csv ../dane/bluetts_val.csv \
+  --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --wyjscie ../dane/latenty --device cuda:4
+```
+
+Statystyki latentów (`stats.pt`) zostają: liczone tym samym kodekiem na 367 h, 60 h mowy tego samego głosu ich
+nie zmieni.
+
+Predyktor długości od nowa na całości (stary zaniżał długość tekstów z cyframi: „2026” to 4 znaki, a ok. 2 s
+mowy), na karcie 4, do osobnego katalogu; najpierw ocena starego dla porównania:
+
+```bash
+python usrednij_dp.py --punkty ../modele/dp/duration_predictor_wsm.pt --device cuda:4
+python -m training.dp.cli --config ../dane/polski_100m.json --data ../dane/bluetts_train.csv \
+  --ae_checkpoint ../modele/kodek_48k/ae_wsm_210_220.pt --stats_path ../modele/stats.pt \
+  --out ../modele/dp_v2 --max_steps 6000 --batch_size 64 --num_workers 3 --device cuda:4
+python usrednij_dp.py --punkty ../modele/dp_v2/duration_predictor_{4500,5000,5500,6000}.pt \
+  --wyjscie ../modele/dp_v2/duration_predictor_wsm.pt --device cuda:4
+```
+
+Ocena pokazuje osobno klipy z cyframi i bez; „odchylenie” ujemne = predyktor zaniża długość (mowa za szybka).
+Nowy predyktor do treningu modelu tekst→latenty (próbki co 5000 kroków): `--dp_checkpoint
+../modele/dp_v2/duration_predictor_wsm.pt` przy restarcie; na sam model tekst→latenty nie wpływa.

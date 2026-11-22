@@ -58,11 +58,15 @@ def policz_latenty(loader, mel_spec, ae_encoder, mean, std, scale, ccf, hop, dev
 
 
 @torch.no_grad()
-def ocen(model, latenty, ccf, hop, sr, device, ziarno=0) -> tuple[float, float]:
-    """Średnia strata L1 logarytmu długości i średni błąd względny długości (w %)."""
+def ocen(model, latenty, ccf, hop, sr, device, ziarno=0) -> tuple[float, float, dict]:
+    """Średnia strata L1 logarytmu długości, średni błąd względny długości (w %) i, osobno dla klipów
+    z cyframi i bez, średnie odchylenie ze znakiem (w %; ujemne = predyktor zaniża długość)."""
+    from training.data.text_vocab import CHAR_TO_ID
+    cyfry = torch.tensor([CHAR_TO_ID[c] for c in "0123456789"], device=device)
     model.eval()
     random.seed(ziarno)
     suma_l1 = suma_wzgl = n = 0.0
+    grupy = {True: [0.0, 0.0, 0], False: [0.0, 0.0, 0]}   # suma ze znakiem, suma |.|, liczba
     for z, valid_z_len, text_ids, text_masks in latenty:
         B, C, _ = z.shape
         # wycinek wzorcowy 5–95% wypowiedzi, tak samo jak w trenerze
@@ -84,15 +88,21 @@ def ocen(model, latenty, ccf, hop, sr, device, ziarno=0) -> tuple[float, float]:
         log_pred = model(text_ids=text_ids, z_ref=z_ref, text_mask=text_masks, ref_mask=ref_mask, return_log=True)
         dur_gt = valid_z_len.float() * (hop * ccf) / float(sr)
         suma_l1 += (log_pred - torch.log(dur_gt.clamp(min=1e-5))).abs().sum().item()
-        suma_wzgl += (torch.exp(log_pred) / dur_gt - 1).abs().sum().item()
+        wzgl = torch.exp(log_pred) / dur_gt - 1
+        suma_wzgl += wzgl.abs().sum().item()
         n += B
-    return suma_l1 / n, 100 * suma_wzgl / n
+        ma_cyfry = (torch.isin(text_ids, cyfry) & (text_masks.squeeze(1) > 0)).any(dim=1)
+        for g in (True, False):
+            w = wzgl[ma_cyfry == g]
+            grupy[g][0] += w.sum().item(); grupy[g][1] += w.abs().sum().item(); grupy[g][2] += w.numel()
+    podzial = {g: (100 * s / max(k, 1), 100 * a / max(k, 1), k) for g, (s, a, k) in grupy.items()}
+    return suma_l1 / n, 100 * suma_wzgl / n, podzial
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--punkty", nargs="+", required=True, help="punkty kontrolne duration_predictor_*.pt (lub wzorzec)")
-    p.add_argument("--wyjscie", required=True)
+    p.add_argument("--wyjscie", help="plik średniej; bez tej flagi tylko ocena podanych punktów (wystarczy jeden)")
     p.add_argument("--config", default="../dane/polski_100m.json")
     p.add_argument("--ae_checkpoint", default="../modele/kodek_48k/ae_wsm_210_220.pt")
     p.add_argument("--stats_path", default="../modele/stats.pt")
@@ -106,19 +116,21 @@ def main() -> None:
     for w in args.punkty:
         sciezki += sorted(glob.glob(w)) if any(c in w for c in "*?[") else [w]
     sciezki = sorted(dict.fromkeys(sciezki), key=krok)
-    if len(sciezki) < 2:
+    if args.wyjscie and len(sciezki) < 2:
         raise SystemExit(f"Do uśrednienia potrzeba co najmniej 2 punktów kontrolnych, jest {len(sciezki)}.")
     for s in sciezki:
         if not os.path.isfile(s):
             raise SystemExit(f"Nie ma pliku: {s}")
 
     stany = [torch.load(s, map_location="cpu") for s in sciezki]
-    srednia = usrednij(stany)
-    os.makedirs(os.path.dirname(os.path.abspath(args.wyjscie)), exist_ok=True)
-    torch.save(srednia, args.wyjscie)
-    print(f"Uśredniono {len(sciezki)} punktów ({', '.join(os.path.basename(s) for s in sciezki)}) -> {args.wyjscie}")
-    if args.bez_oceny:
-        return
+    srednia = None
+    if args.wyjscie:
+        srednia = usrednij(stany)
+        os.makedirs(os.path.dirname(os.path.abspath(args.wyjscie)), exist_ok=True)
+        torch.save(srednia, args.wyjscie)
+        print(f"Uśredniono {len(sciezki)} punktów ({', '.join(os.path.basename(s) for s in sciezki)}) -> {args.wyjscie}")
+        if args.bez_oceny:
+            return
 
     device = torch.device(args.device)
     dp_cfg = _load_dp_config(args.config)
@@ -148,14 +160,21 @@ def main() -> None:
                         collate_fn=partial(collate_dp, spk2idx=None, unknown_spk=0))
     latenty = policz_latenty(loader, mel_spec, ae_encoder, mean, std, scale, ccf, hop, device)
     print(f"Walidacja: {len(ds)} klipów")
-    print(f"{'model':<34} {'strata (L1 log)':>15} {'błąd długości':>14}")
-    for s, st in zip(sciezki, stany):
+    print(f"{'model':<34} {'strata (L1 log)':>15} {'błąd długości':>14} | {'z cyframi: błąd':>15} {'odchylenie':>10} "
+          f"| {'bez cyfr: błąd':>14} {'odchylenie':>10}")
+
+    def wiersz(nazwa, st):
         model.load_state_dict(st)
-        l1, wzgl = ocen(model, latenty, ccf, hop, sr, device)
-        print(f"{os.path.basename(s):<34} {l1:>15.4f} {wzgl:>13.2f}%")
-    model.load_state_dict(srednia)
-    l1, wzgl = ocen(model, latenty, ccf, hop, sr, device)
-    print(f"{'średnia (' + str(len(sciezki)) + ' punktów)':<34} {l1:>15.4f} {wzgl:>13.2f}%")
+        l1, wzgl, g = ocen(model, latenty, ccf, hop, sr, device)
+        (sc, ac, kc), (sb, ab, kb) = g[True], g[False]
+        print(f"{nazwa:<34} {l1:>15.4f} {wzgl:>13.2f}% | {ac:>14.2f}% {sc:>+9.2f}% | {ab:>13.2f}% {sb:>+9.2f}%")
+        return kc, kb
+
+    for s, st in zip(sciezki, stany):
+        kc, kb = wiersz(os.path.basename(s), st)
+    if srednia is not None:
+        kc, kb = wiersz(f"średnia ({len(sciezki)} punktów)", srednia)
+    print(f"(klipów z cyframi: {kc}, bez cyfr: {kb}; odchylenie ujemne = predyktor zaniża długość, mowa za szybka)")
 
 
 if __name__ == "__main__":
