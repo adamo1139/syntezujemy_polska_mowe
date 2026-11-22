@@ -206,8 +206,9 @@ skopiuj wybrany do pustego katalogu i podaj go jako `--out` (albo przenieś nows
   `max_batch` = 64 klipy. Przy losowych partiach 53% obliczeń szło na dopełnienie zerami, tak ok. 1%; średnio
   ok. 18 klipów na partię. `ttl.train.amp` = `bf16`: autocast dla enkoderów i pola wektorowego, strata w float32.
   Budżet zmienia `--batch_seconds`; przy OOM zmniejszyć, przy dużym zapasie pamięci zwiększyć.
-- **Długość treningu i progi (decyzja 2026-11-21):** plan 100 tys. kroków; SPFM od kroku 15 000
-  (`ttl.train.spfm_start`, oryginał 40 000), RSF od 50 000 (`ttl.rsf.start_step`, oryginał 200 000).
+- **Długość treningu i progi:** plan 100 tys. kroków (2026-11-21), potem 500 tys.; SPFM wyłączony
+  (`ttl.train.spfm_enabled`, 2026-11-22: tylko ok. 0,06% brudnych klipów); RSF od 150 000 (`ttl.rsf.start_step`,
+  2026-11-22, wcześniej 50 000; oryginał 200 000).
 - **Weights & Biases:** `--wandb PROJEKT` (raz na rigu `wandb login`). Co `--log_every` kroków (10) średnie: strata,
   tempo uczenia, kroki/s, klipy i sekundy audio na sekundę (wszystkie karty), klipy na partię, dopełnienie,
   MFU i TFLOPS na kartę, szczyt pamięci; co epokę SPFM; co 5000 kroków próbki odsłuchowe. Sesja jest zapisana
