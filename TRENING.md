@@ -414,3 +414,23 @@ Moduł poprawki to tylko mały zysk; brzmienie dalej odstaje od oryginału — d
 do tekstu — oryginał VoxCPM2 0,972, rekonstrukcja starym dekoderem 0,970, z modułem poprawki 0,970, synteza
 modelem 115k 0,979. Kodek niczego nie psuje; błędy są już w nagraniach VoxCPM2 („20 tys. zł” → „20 Tysu Dzeko”,
 „1,5 godziny” → „7 godziny”, „np. do 1 kV” → bełkot). Wyjście: zamiana liczb na słowa przed syntezą.
+
+## 8. Postfiltr COSE (jednokrokowy, generatywny) — eksperyment
+
+Kod w `cose/` (kopia ICDM-UESTC/COSE z poprawkami; **repo autorów nie ma licencji — kod oznaczony jako UNLICENSED**,
+szczegóły w `cose/README.md`). Postfiltr uczy się zamieniać wyjście naszego dekodera w nagranie VoxCPM2 w jednym
+przejściu sieci (średnia prędkość, bez pochodnych Jacobiego). Pierwszy test: pełna szerokość `nf=128` (ok. 66M, bez
+atencji), żeby sprawdzić, czy metoda w ogóle pomaga; potem `nf=32` (4,1M) pod szybkość.
+
+Szybkość na CPU (16 wątków): nasz TTS RTF ok. 0,4 (CFG 4/16 kroków), 0,12 (8 kroków); dekoder 0,02; COSE 1 krok:
+`nf=32` 0,53, `nf=64` 1,15, `nf=128` 2,61 — na CPU postfiltr byłby najwolniejszą częścią.
+
+```bash
+# z trening/ (środowisko treningowe): pary clean (VoxCPM2) / noisy (kodek z modułem poprawki), ok. 30 h, ok. 21 GB
+python przygotuj_pary_cose.py --wyjscie ../dane/cose_pary --klipy 12000 --device cuda:4
+# z cose/ (osobne środowisko, patrz cose/README.md): trening
+CUDA_VISIBLE_DEVICES=4 python train.py --backbone ncsnpp --nf 128 --attn_resolutions 0 \
+  --base_dir ../dane/cose_pary --log_dir ../modele/cose_nf128 \
+  --sr 48000 --n_fft 1534 --hop_length 384 --num_frames 256 --batch_size 4 --num_workers 6 \
+  --loss_type mean_flow --num_eval_files 20 --max_epochs 100 --save_ckpt_interval 5000
+```

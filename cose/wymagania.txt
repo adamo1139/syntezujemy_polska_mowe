@@ -1,0 +1,14 @@
+# [syntezujemy_polska_mowe] nowoczesne wersje zamiast requirements.txt autorów (torch 2.2, numpy 1.21);
+# torch i torchaudio instalowane osobno z indeksu cu128 (patrz README.md)
+pytorch-lightning>=2.4
+torch-ema
+pesq
+pystoi
+torch-pesq
+librosa
+soundfile
+scipy
+numpy
+pandas
+tqdm
+tensorboard
