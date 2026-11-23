@@ -631,6 +631,9 @@ def main():
     parser.add_argument('--checkpoint_dir', type=str, default='checkpoints/ae', help='Checkpoints, logs and eval audio')
     parser.add_argument('--total_steps', type=int, default=1500000, help='Loop length and cosine T_max')
     parser.add_argument('--batch_size', type=int, default=None, help='Per-process batch size (overrides ae.train.batch_size)')
+    parser.add_argument('--segment_sec', type=float, default=None,
+                        help='Długość segmentu treningowego w s (nadpisuje ae.data.segment_size, oryginał 1,4 s); '
+                             'koszt kroku rośnie liniowo, więc przy dłuższym zwykle mniejsze --batch_size')
     # --- Encoder-only training against a frozen decoder ---
     parser.add_argument('--encoder_only', action='store_true', help='Freeze the decoder (from --decoder) and train the encoder + discriminators')
     parser.add_argument('--decoder', type=str, default=None, help='Frozen decoder for --encoder_only: an AE .pt checkpoint, or "official"')
@@ -673,6 +676,9 @@ def main():
     parser.add_argument('--hiband_w', type=float, default=0.0, help='Weight of the 12-22 kHz log-magnitude STFT L1')
     parser.add_argument('--hiband_hz', type=float, default=None,
                         help='Dolna granica pasma straty --hiband_w w Hz (domyślnie prążek 558 z 2048, jak w oryginale)')
+    parser.add_argument('--d_crop', type=float, default=0.19,
+                        help='Długość wycinka dla MPD/MRD w sekundach (oryginał 0,19; koszt dyskryminatorów rośnie liniowo); '
+                             'nie dłużej niż segment (domyślnie 1,4 s)')
     parser.add_argument('--slm_w', type=float, default=0.0,
                         help='Waga straty przeciwstawnej dyskryminatora SLM (zamrożony WavLM-Base+, jak w StyleTTS2); 0 = wyłączony')
     parser.add_argument('--slm_fm_w', type=float, default=0.0,
@@ -741,6 +747,8 @@ def main():
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
     
+    if args.segment_sec:
+        data_cfg['segment_size'] = int(round(args.segment_sec * data_cfg['sample_rate'] / CHUNK)) * CHUNK   # pełne porcje 3072
     dataset = TTSDataset(data_cfg['train_metadata'], sample_rate=data_cfg['sample_rate'], segment_size=data_cfg.get('segment_size'),
                          end_crop_prob=0.5 if args.edge_aware else 0.0, drop_list=args.drop_list)
     sampler = DistributedSampler(dataset)
@@ -970,7 +978,9 @@ def main():
         if slm is not None: extra["slm"], extra["opt_slm"] = slm.head.state_dict(), opt_slm.state_dict()
         save_checkpoint(step, epoch, encoder, decoder, mpd, mrd, opt_g, opt_d, schedulers, logger, ckpt_dir, decoder_source, extra)
 
-    crop_len = int(data_cfg['sample_rate'] * 0.19)
+    crop_len = int(data_cfg['sample_rate'] * args.d_crop)   # wycinek dla MPD/MRD (przepis oryginału: 0,19 s)
+    if args.local_rank == 0 and args.d_crop != 0.19:
+        logger.info(f"Wycinek dla MPD/MRD: {args.d_crop:g} s ({crop_len} próbek; segment {data_cfg.get('segment_size')} próbek)")
     # Pasek postępu: średnia z ostatnich 2 epok (kroków na epokę na jedną kartę, jak liczy tqdm).
     meter_window = max(1, 2 * len(dataloader))
     g_meter, d_meter, mel_meter = AverageMeter(meter_window), AverageMeter(meter_window), AverageMeter(meter_window)
