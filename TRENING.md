@@ -344,7 +344,7 @@ python skrypty/generuj.py --karty 4 --teksty liczby/do_syntezy.jsonl --wyjscie w
 # podmiana nagrań: te same id dostają nowe audio, podział bez zmian
 python skrypty/przygotuj_audio.py --zastap wyniki/poziomka_liczby_slownie
 
-# walidacja z liczbami tak samo (potrzebny pip install morfeusz2)
+# walidacja z liczbami tak samo (potrzebny uv pip install morfeusz2)
 python liczby/normalizuj.py --wejscie teksty/val_liczby.jsonl --wyjscie teksty/val_liczby_slownie.jsonl
 python skrypty/generuj.py --pomin 0 --teksty teksty/val_liczby_slownie.jsonl --wyjscie wyniki/poziomka_val_liczby_slownie \
   --cfg 2.0 --kroki 10 --rownolegle 32
@@ -359,7 +359,7 @@ python skrypty/wyslij_na_hf.py --repo RockTheBoat/VoxCPM2-pol-one-voice-liczby-s
 ```
 
 Czyszczenie przez ASR (`skrypty/czysc_asr.py`, Parakeet Ultra przez Photon; osobne środowisko z
-`pip install moondream sentence-transformers morfeusz2 rapidfuzz`). Transkrypcja przechodzi przez ten sam
+`uv pip install moondream sentence-transformers morfeusz2 rapidfuzz`). Transkrypcja przechodzi przez ten sam
 normalizator co tekst, potem idzie porównanie: CER/WER, podobieństwo embeddingów (multilingual-e5-large), ucięty
 koniec, dopiski, zapętlenia, tempo. Wynik trafia do `<synteza>/asr/` (`raport.txt`, `usun.txt`, `odsluch.txt`,
 `probki/`).

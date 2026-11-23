@@ -14,7 +14,7 @@ Każdy tekst dostaje listę flag; flaga oznacza, że reguła zgadywała (np. rze
   python liczby/normalizuj.py --wejscie liczby/teksty_hf.parquet --wyjscie liczby/teksty_slowne.jsonl
   python liczby/normalizuj.py --wejscie teksty/val_liczby.jsonl --wyjscie teksty/val_liczby_slownie.jsonl
 (plik z polem „tekst”, np. z wybierz_teksty.py, daje od razu wejście dla generuj.py: tekst słowny + tekst_cyfry)
-Wymaga: pip install morfeusz2
+Wymaga: uv pip install morfeusz2
 """
 
 from __future__ import annotations

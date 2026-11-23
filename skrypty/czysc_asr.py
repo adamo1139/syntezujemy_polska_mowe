@@ -17,7 +17,7 @@ Trzy kroki (każdy wznawialny, wyniki w katalogu --praca, domyślnie <katalog sy
          i --probki N najgorszych klipów skopiowanych do <praca>/probki/ do odsłuchu.
   Usunięcie z danych: python skrypty/przygotuj_audio.py --zastap KATALOG --usun KATALOG/asr/usun.txt
 
-Przykład (karty 1,2,3,5,6,7, środowisko z `pip install moondream sentence-transformers morfeusz2 rapidfuzz`):
+Przykład (karty 1,2,3,5,6,7, środowisko z `uv pip install moondream sentence-transformers morfeusz2 rapidfuzz`):
 
   python skrypty/czysc_asr.py asr wyniki/poziomka_liczby_slownie --karty 1,2,3,5,6,7
   python skrypty/czysc_asr.py ocen wyniki/poziomka_liczby_slownie --probki 40
