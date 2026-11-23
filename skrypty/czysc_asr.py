@@ -7,7 +7,8 @@ Trzy kroki (każdy wznawialny, wyniki w katalogu --praca, domyślnie <katalog sy
          --karty 1,2,3 puszcza po jednym procesie na kartę (każdy bierze swoją część zbioru, log w <praca>/).
   ocen   porównanie transkrypcji z polem „tekst” (to, co dostał VoxCPM2): obie strony przechodzą przez
          liczby/normalizuj.py (Parakeet pisze liczby cyframi) i tę samą normalizację słów. Miary:
-           cer, wer            błąd znakowy/wyrazowy po normalizacji
+           cer, wer            błąd znakowy (bez spacji) / wyrazowy po normalizacji
+           dziura              najdłuższy ciągły fragment niezgodności w znakach (bełkot, pominięcie)
            cos                 podobieństwo embeddingów (domyślnie intfloat/multilingual-e5-large)
            brak_konca          ostatnie słowa tekstu nie zostały powiedziane (ucięcie)
            dopisek             słowa dopowiedziane na końcu/początku (bełkot, halucynacja)
@@ -20,7 +21,7 @@ Trzy kroki (każdy wznawialny, wyniki w katalogu --praca, domyślnie <katalog sy
 Przykład (karty 1,2,3,5,6,7, środowisko z `uv pip install moondream sentence-transformers morfeusz2 rapidfuzz`):
 
   python skrypty/czysc_asr.py asr wyniki/poziomka_liczby_slownie --karty 1,2,3,5,6,7
-  python skrypty/czysc_asr.py ocen wyniki/poziomka_liczby_slownie --probki 40 --usun-bez-asr
+  python skrypty/czysc_asr.py ocen wyniki/poziomka_liczby_slownie --usun-procent 10 --usun-bez-asr --probki 40
 """
 
 from __future__ import annotations
@@ -176,23 +177,45 @@ def powtorzenia(s: list[str], n: int = 3) -> int:
     return max(licz.values()) - 1
 
 
+SKROTY = [(r"\bnp\.", "na przykład"), (r"\bm\.\s?in\.", "między innymi"), (r"\bitd\.", "i tak dalej"),
+          (r"\bitp\.", "i tym podobne"), (r"\btj\.", "to jest"), (r"\btzn\.", "to znaczy"), (r"\+", " plus "),
+          (r"π", " pi "), (r"&", " i ")]
+
+
+def do_porownania(tekst: str, normalizuj) -> list[str]:
+    """Słowa do porównania: skróty i symbole rozwinięte tak, jak je zapisuje ASR, liczby słownie."""
+    for wzor, zamiana in SKROTY:
+        tekst = re.sub(wzor, zamiana, tekst, flags=re.I)
+    return slowa(normalizuj(tekst)[0])
+
+
 def porownaj(ref: list[str], hyp: list[str]) -> dict:
+    """Miary liczone na znakach bez spacji („Ergo Hestia” = „ergohestia”). „dziura” to najdłuższy ciągły
+    fragment niezgodności (odległość znakowa w jednym miejscu): bełkot daje dużą, różnica w pisowni małą."""
     sm = difflib.SequenceMatcher(a=ref, b=hyp, autojunk=False)
-    ops = [o for o in sm.get_opcodes()]
+    ops = [o for o in sm.get_opcodes() if o[0] != "equal"]
+
+    def znaki(op):
+        _, i1, i2, j1, j2 = op
+        return odleglosc(list("".join(ref[i1:i2])), list("".join(hyp[j1:j2])))
+
+    dziura = max((znaki(o) for o in ops), default=0)
     brak_konca = dopisek_konca = dopisek_poczatku = 0
     if ops:
         op, i1, i2, j1, j2 = ops[-1]
-        if op in ("delete", "replace") and i2 == len(ref):
-            brak_konca = (i2 - i1) - (j2 - j1 if op == "replace" else 0)
-        if op in ("insert", "replace") and j2 == len(hyp):
-            dopisek_konca = (j2 - j1) - (i2 - i1 if op == "replace" else 0)
+        if znaki(ops[-1]) >= 6:  # mniejsza różnica na końcu to pisownia, nie ucięcie
+            if op in ("delete", "replace") and i2 == len(ref):
+                brak_konca = (i2 - i1) - (j2 - j1 if op == "replace" else 0)
+            if op in ("insert", "replace") and j2 == len(hyp):
+                dopisek_konca = (j2 - j1) - (i2 - i1 if op == "replace" else 0)
         op, i1, i2, j1, j2 = ops[0]
-        if op in ("insert", "replace") and j1 == 0:
+        if op in ("insert", "replace") and j1 == 0 and znaki(ops[0]) >= 6:
             dopisek_poczatku = (j2 - j1) - (i2 - i1 if op == "replace" else 0)
-    zr, zh = " ".join(ref), " ".join(hyp)
+    zr, zh = "".join(ref), "".join(hyp)
     return {
         "wer": odleglosc(ref, hyp) / max(1, len(ref)),
         "cer": odleglosc(list(zr), list(zh)) / max(1, len(zr)),
+        "dziura": dziura,
         "brak_konca": max(0, brak_konca),
         "dopisek": max(0, dopisek_konca) + max(0, dopisek_poczatku),
         "powtorzenie": max(0, powtorzenia(hyp) - powtorzenia(ref)),
@@ -220,8 +243,8 @@ def krok_ocen(args) -> None:
 
     oceny = []
     for w in klipy:
-        ref = slowa(normalizuj(w["tekst"])[0])
-        hyp = slowa(normalizuj(asr[w["id"]] or "")[0])
+        ref = do_porownania(w["tekst"], normalizuj)
+        hyp = do_porownania(asr[w["id"]] or "", normalizuj)
         o = {"id": w["id"], "tekst": w["tekst"], "asr": asr[w["id"]], "sekundy": w["sekundy"], "audio": w["audio"],
              **porownaj(ref, hyp), "znaki_na_s": len(" ".join(ref)) / max(0.1, w["sekundy"])}
         oceny.append(o)
@@ -251,6 +274,8 @@ def krok_ocen(args) -> None:
         powody = []
         if o["cer"] > args.max_cer:
             powody.append(f"cer {o['cer']:.2f}")
+        if o["dziura"] >= args.max_dziura:
+            powody.append(f"dziura {o['dziura']} zn.")
         if o["brak_konca"] >= args.min_brak:
             powody.append(f"ucięty koniec ({o['brak_konca']} sł.)")
         if o["dopisek"] >= args.min_dopisek:
@@ -264,8 +289,19 @@ def krok_ocen(args) -> None:
         o["powody"] = powody
         if powody:
             usun.append(o)
-        elif o["cer"] > args.odsluch_cer or ("cos" in o and o["cos"] < args.odsluch_cos):
+        elif (o["cer"] > args.odsluch_cer or o["dziura"] >= args.odsluch_dziura
+              or ("cos" in o and o["cos"] < args.odsluch_cos)):
             odsluch.append(o)
+
+    if args.usun_procent:  # prosto: najgorsze N% według CER, progi powyżej nie mają znaczenia
+        kolejnosc = sorted(oceny, key=lambda o: -o["cer"])
+        ile = round(len(oceny) * args.usun_procent / 100)
+        usun, odsluch = kolejnosc[:ile], kolejnosc[ile:ile + 200]  # do odsłuchu: 200 klipów tuż za granicą
+        for o in oceny:
+            o["powody"] = []
+        for o in usun:
+            o["powody"] = [f"najgorsze {args.usun_procent:g}% (cer {o['cer']:.2f})"]
+        print(f"Usuwam najgorsze {args.usun_procent:g}% według CER: {ile} klipów, granica CER {usun[-1]['cer']:.3f}")
 
     with (praca / "oceny.jsonl").open("w", encoding="utf-8") as plik:
         for o in oceny:
@@ -282,10 +318,13 @@ def krok_ocen(args) -> None:
         f"do usunięcia: {len(usun)} ({len(usun) / len(oceny):.1%}, {h(usun):.1f} h)"
         + (f" + {len(usun_bez_asr)} bez transkrypcji ({h(usun_bez_asr):.1f} h)" if usun_bez_asr else ""),
         f"do odsłuchu (granica): {len(odsluch)} ({h(odsluch):.1f} h)",
+        *([f"granica CER: {usun[-1]['cer']:.3f} (najgorsze {args.usun_procent:g}%)"] if args.usun_procent and usun else []),
         "powody (klip może mieć kilka):",
     ]
     licznik = collections.Counter(p.split(" (")[0].split(" ")[0] for o in usun for p in o["powody"])
     linie += [f"  {p}: {c}" for p, c in licznik.most_common()]
+    for prog in (6, 8, 10, 12, 16, 24, 40):
+        linie.append(f"  dziura >= {prog} zn.: {sum(o['dziura'] >= prog for o in oceny)}")
     for prog in (0.02, 0.05, 0.1, 0.2, 0.5):
         linie.append(f"  CER > {prog}: {sum(o['cer'] > prog for o in oceny)}")
     linie.append("\nprzykłady do usunięcia:")
@@ -300,8 +339,11 @@ def krok_ocen(args) -> None:
         katalog_probek = praca / "probki"
         shutil.rmtree(katalog_probek, ignore_errors=True)
         katalog_probek.mkdir()
-        wybrane = sorted(usun, key=lambda o: -o["cer"])[: args.probki // 2]
-        wybrane += sorted(odsluch, key=lambda o: -o["cer"])[: args.probki - len(wybrane)]
+        if args.usun_procent:  # klipy po obu stronach granicy: ostatnie usunięte i pierwsze zostawione
+            wybrane = usun[-(args.probki // 2):] + odsluch[: args.probki - args.probki // 2]
+        else:
+            wybrane = sorted(usun, key=lambda o: -o["cer"])[: args.probki // 2]
+            wybrane += sorted(odsluch, key=lambda o: -o["cer"])[: args.probki - len(wybrane)]
         with (katalog_probek / "opis.txt").open("w", encoding="utf-8") as opis:
             for nr, o in enumerate(wybrane):
                 nazwa = f"{nr:03d}_{'usun' if o['powody'] else 'odsluch'}_{o['id']}.flac"
@@ -332,12 +374,17 @@ def main() -> None:
     o.add_argument("--bez-embeddingow", action="store_true")
     o.add_argument("--usun-bez-asr", action="store_true",
                    help="klipy bez transkrypcji (ASR się nie udał, np. przester) też do usun.txt")
-    o.add_argument("--max-cer", type=float, default=0.15, help="powyżej: usuń")
+    o.add_argument("--usun-procent", type=float,
+                   help="usuń po prostu najgorsze N%% klipów według CER (zamiast progów poniżej)")
+    o.add_argument("--max-cer", type=float, default=0.25, help="powyżej: usuń")
+    o.add_argument("--max-dziura", type=int, default=12,
+                   help="tyle znaków niezgodności w jednym miejscu (bełkot, pominięty fragment): usuń")
+    o.add_argument("--odsluch-dziura", type=int, default=8)
     o.add_argument("--min-cos", type=float, default=0.85, help="poniżej: usuń")
     o.add_argument("--min-brak", type=int, default=2, help="tyle niewypowiedzianych słów na końcu: usuń")
     o.add_argument("--min-dopisek", type=int, default=3, help="tyle dopowiedzianych słów na brzegu: usuń")
     o.add_argument("--max-tempo-z", type=float, default=5.0, help="odchylenie tempa (w MAD): usuń")
-    o.add_argument("--odsluch-cer", type=float, default=0.06, help="powyżej (i nie usunięte): do odsłuchu")
+    o.add_argument("--odsluch-cer", type=float, default=0.10, help="powyżej (i nie usunięte): do odsłuchu")
     o.add_argument("--odsluch-cos", type=float, default=0.92)
     o.add_argument("--probki", type=int, default=0, help="skopiuj N najgorszych klipów do odsłuchu")
 

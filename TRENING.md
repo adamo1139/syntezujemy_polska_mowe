@@ -366,7 +366,7 @@ koniec, dopiski, zapętlenia, tempo. Wynik trafia do `<synteza>/asr/` (`raport.t
 
 ```bash
 python skrypty/czysc_asr.py asr wyniki/poziomka_liczby_slownie --karty 1,2,3,5,6,7
-python skrypty/czysc_asr.py ocen wyniki/poziomka_liczby_slownie --probki 40 --usun-bez-asr
+python skrypty/czysc_asr.py ocen wyniki/poziomka_liczby_slownie --usun-procent 10 --usun-bez-asr --probki 40
 python skrypty/przygotuj_audio.py --zastap wyniki/poziomka_liczby_slownie --usun wyniki/poziomka_liczby_slownie/asr/usun.txt
 ```
 
