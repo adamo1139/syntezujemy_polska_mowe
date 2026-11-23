@@ -152,6 +152,7 @@ class ExtraTerms:
     hiband_bin: int = 558        # pierwszy prążek STFT 2048 liczony do straty pasma wysokiego
     hiband_floor: float = 1e-5   # podłoga amplitudy przed logarytmem
     linie_w: float = 0.0         # strata prążków co sr/HOP (ślad sklejania klatek dekodera)
+    modulacja_w: float = 0.0     # strata modulacji obwiedni szumu 4–16 kHz w rytmie klatek (sr/HOP i wielokrotności)
     floor_w: float = 0.0
     floor_db: float = -60.0
 
@@ -225,6 +226,43 @@ def heldout_linie(encoder, decoder, mel_transform, clips, device):
         w.append(linie_loss(y[None, :, :n], wav[None, :, :n]).item())
     return sum(w) / len(w)
 
+def modulacja_loss(y_hat, audio, sr=48000, hop=HOP, pasmo=(4000.0, 16000.0), kmax=6, n_fft=256, krok=32,
+                   szer=2, tlo=30):
+    """Schodki szumu: obwiednia energii w paśmie 4–16 kHz (log, ramki co `krok` próbek, okno n_fft) i jej widmo;
+    dla k = 1..kmax (6) wysokość prążka przy k·sr/hop (93,75 Hz przy 48 kHz i hop 512) nad lokalnym tłem obwiedni.
+    Strata: średni NADMIAR tej wysokości ponad prawdziwe nagranie (modulacja obecna w celu nie jest karana).
+    Na syntezach i rekonstrukcjach: oryginał VoxCPM2 ok. 3,4 dB, dekodery 9–13 dB (miara w dB, tu w log)"""
+    x, r = y_hat.reshape(y_hat.shape[0], -1).float(), audio.reshape(audio.shape[0], -1).float()
+    okno = torch.hann_window(n_fft, device=x.device)
+    lo, hi = int(pasmo[0] / sr * n_fft), int(pasmo[1] / sr * n_fft)
+    def wysokosc(s):
+        S = torch.stft(s, n_fft, krok, window=okno, center=True, return_complex=True).abs().pow(2)[:, lo:hi].sum(1)
+        e = torch.log(S + 1e-8)                                               # [B, T] obwiednia (log energii)
+        e = (e - e.mean(-1, keepdim=True)) * torch.hann_window(e.shape[-1], device=e.device)
+        A = torch.fft.rfft(e, dim=-1).abs() + 1e-6
+        df = (sr / krok) / e.shape[-1]
+        h = []
+        for k in range(1, kmax + 1):
+            c = int(round(k * sr / hop / df))
+            if c + tlo >= A.shape[-1]: break
+            szczyt = A[:, c - szer : c + szer + 1].amax(-1)
+            otoczenie = torch.cat([A[:, c - tlo : c - szer], A[:, c + szer + 1 : c + tlo + 1]], dim=-1).mean(-1)
+            h.append(torch.log(szczyt) - torch.log(otoczenie))
+        return torch.stack(h, -1)
+    return (wysokosc(x) - wysokosc(r)).clamp_min(0).mean()
+
+@torch.no_grad()
+def heldout_modulacja(encoder, decoder, mel_transform, clips, device):
+    """Średnia modulacja_loss na odłożonych klipach (całe klipy)."""
+    encoder.eval(); decoder.eval()
+    w = []
+    for wav in clips:
+        wav = wav.to(device).unsqueeze(0)
+        y = decoder(encoder(mel_transform(wav))).reshape(1, -1)
+        n = min(y.shape[-1], wav.shape[-1])
+        w.append(modulacja_loss(y[:, :n], wav[:, :n]).item())
+    return sum(w) / len(w)
+
 def silence_floor_loss(y_hat, audio, floor_db, mask=None, frame=1024):
     """On frames whose source is below `floor_db` dBFS, the decoded level above `floor_db`, in units of 20 dB."""
     n = audio.shape[-1] // frame
@@ -239,6 +277,7 @@ def extra_losses(terms, encoder, mel_transform, audio, y_hat, z, lengths, mask):
     if terms.tail_w > 0: out["tail"] = (terms.tail_w, tail_consistency_loss(encoder, mel_transform, audio, z, lengths, terms.tail_norm))
     if terms.hiband_w > 0: out["hiband"] = (terms.hiband_w, hiband_loss(y_hat, audio, min_bin=terms.hiband_bin, floor=terms.hiband_floor))
     if terms.linie_w > 0: out["linie"] = (terms.linie_w, linie_loss(y_hat, audio))
+    if terms.modulacja_w > 0: out["modulacja"] = (terms.modulacja_w, modulacja_loss(y_hat, audio))
     if terms.floor_w > 0: out["floor"] = (terms.floor_w, silence_floor_loss(y_hat, audio, terms.floor_db, mask))
     return out
 
@@ -701,6 +740,9 @@ def main():
     parser.add_argument('--slm_fm_w', type=float, default=0.0,
                         help='Waga dopasowania cech WavLM (średnie L1 po warstwach, wyjście vs cel); 0 = wyłączone')
     parser.add_argument('--slm_partia', type=int, default=16, help='Ile klipów porcji idzie przez WavLM (pamięć)')
+    parser.add_argument('--modulacja_w', type=float, default=0.0,
+                        help='Waga straty modulacji obwiedni szumu 4–16 kHz w rytmie klatek głowicy (93,75 Hz i wielokrotności; '
+                             'tylko nadmiar ponad oryginał) — „schodki szumu”')
     parser.add_argument('--linie_w', type=float, default=0.0,
                         help='Waga straty prążków co 93,75 Hz (wysokość ponad tło względem prawdziwego nagrania)')
     parser.add_argument('--hiband_floor', type=float, default=1e-5, help='Podłoga amplitudy w stracie --hiband_w (np. 1e-7)')
@@ -968,7 +1010,7 @@ def main():
                     f"{sum(c.shape[-1] for c in heldout['clips']) / data_cfg['sample_rate'] / 60:.1f} min")
     terms = ExtraTerms(tail_w=args.tail_consistency, hiband_w=args.hiband_w, floor_w=args.floor_w, floor_db=args.floor_db,
                        hiband_bin=round(args.hiband_hz * 2048 / data_cfg['sample_rate']) if args.hiband_hz else 558,
-                       hiband_floor=args.hiband_floor, linie_w=args.linie_w)
+                       hiband_floor=args.hiband_floor, linie_w=args.linie_w, modulacja_w=args.modulacja_w)
     if args.local_rank == 0 and args.hiband_w > 0:
         logger.info(f"Strata pasma wysokiego: waga {args.hiband_w}, od {terms.hiband_bin * data_cfg['sample_rate'] / 2048:.0f} Hz, "
                     f"podłoga {args.hiband_floor:g}")
@@ -1108,6 +1150,9 @@ def main():
                     _lin = heldout_linie(_mod(enc_ema), _mod(dec_ema), mel_transform_input, heldout["clips"], device)
                     set_train_modes()
                     writer.add_scalar("Loss/Heldout_Linie", _lin, step)
+                    _mod_h = heldout_modulacja(_mod(enc_ema), _mod(dec_ema), mel_transform_input, heldout["clips"], device)
+                    set_train_modes()
+                    writer.add_scalar("Loss/Heldout_Modulacja", _mod_h, step)
                     _ut = ""
                     if args.heldout_utmos:
                         if "utmos" not in heldout:
@@ -1122,7 +1167,7 @@ def main():
                         writer.add_scalar("Loss/Heldout_UTMOS", _u, step)
                         writer.add_scalar("Loss/Heldout_UTMOS_oryginal", heldout["utmos_oryginal"], step)
                         _ut = f", UTMOS {_u:.3f} (oryginały {heldout['utmos_oryginal']:.3f})"
-                    logger.info(f"step {step}: odłożone klipy — recon {_rec:.4f}, log-mel całe pasmo {_full:.4f}, prążki {_lin:.4f}{_ut} ({time.time() - _t:.1f} s)")
+                    logger.info(f"step {step}: odłożone klipy — recon {_rec:.4f}, log-mel całe pasmo {_full:.4f}, prążki {_lin:.4f}, modulacja {_mod_h:.4f}{_ut} ({time.time() - _t:.1f} s)")
                     if device.type == "cuda": torch.cuda.empty_cache()   # bufory oceny (długie klipy, UTMOS) nie zostają na trening
             if prof:
                 prof.mark("reszta pętli (harmonogram, uśrednianie, log, zapis)")
