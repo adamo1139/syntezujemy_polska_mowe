@@ -359,3 +359,15 @@ przyciemnienie 2–12 kHz o 1–2 dB względem 1 kHz i ścięcie powyżej 16 kHz
 
 Pliki odsłuchów i skrypty leżą lokalnie, poza gitem: `audiosr/`, `sidon/`, `ulepszacze/`, `syntezy/`.
 Następny krok: wbudować łańcuch (Sidon + korektor) w `trening/syntezuj.py` jako opcję.
+
+**Dotrenowanie dekodera pod pasmo wysokie: porzucone (2026-11-23).** Tryb `--decoder_only` (enkoder zamrożony),
+start z `ae_wsm_210_220.pt` i dyskryminatorów z `ae_220000.pt`, strata `--hiband_w` od 12 kHz:
+(1) tempo 8,5e-5 bez rozgrzewki, waga 5, podłoga 1e-7: po 1000 krokach `Heldout_LogMel_Full` 0,607 → 0,739,
+strata pasma też rosła (zepsuł już pierwszy krok świeżego Adama); (2) tempo 2e-5 z rozgrzewką 1000, waga 2,
+podłoga 1e-6: start czysty (0,5771), ale do kroku 2000 rosły LogMel_Full i Recon, a strata pasma stanęła wysoko.
+Pasmo wysokie zostaje poprawiane stałym korektorem przy syntezie; dekoder dalej `ae_wsm_210_220.pt`.
+
+**Głowica w stylu Vocos** (`--decoder_head istft`, `ISTFTHead`): zmierzony ślad sklejania kawałków po 512 próbek
+(prążki na k·93,75 Hz: oryginał 1,7, rekonstrukcja 3,6, synteza 4,6 ponad tło). Trening: ciało dekodera z
+`ae_wsm_210_220.pt`, nowa ostatnia warstwa głowicy od zera, przez `--head_warmup` kroków uczy się sama głowica,
+tempo głowicy `--lr × --head_lr_scale`, bez straty pasma wysokiego.

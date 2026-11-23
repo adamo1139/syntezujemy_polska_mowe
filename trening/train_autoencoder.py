@@ -549,6 +549,8 @@ def main():
     parser.add_argument('--istft_n_fft', type=int, default=2048, help='Długość ramki głowicy istft (wielokrotność 512)')
     parser.add_argument('--head_warmup', type=int, default=0,
                         help='Przez pierwsze N kroków uczy się tylko głowica dekodera (reszta dekodera stoi), potem cały dekoder')
+    parser.add_argument('--head_lr_scale', type=float, default=1.0,
+                        help='Z --decoder_only i --constant_lr: tempo głowicy dekodera = --lr × ta wartość (nowa głowica od zera)')
     parser.add_argument('--d_warmup', type=int, default=0, help='Discriminators frozen, reconstruction-only loss for the first N steps')
     parser.add_argument('--stage2', action='store_true', help='Resume an --encoder_only checkpoint (--resume) with the decoder trainable')
     # --- Paper losses (defaults reproduce the 1.5M-step recipe) ---
@@ -690,7 +692,9 @@ def main():
         _dec = list(_mod(decoder).named_parameters())
         _cialo = param_groups([(n, p) for n, p in _dec if not n.startswith('head.')], lr, no_decay_norms)
         for g in _cialo: g['cialo_dekodera'] = True   # --head_warmup: tempo 0 przez pierwsze kroki
-        g_groups = _cialo + param_groups([(n, p) for n, p in _dec if n.startswith('head.')], lr, no_decay_norms)
+        _glowica = param_groups([(n, p) for n, p in _dec if n.startswith('head.')], lr, no_decay_norms)
+        for g in _glowica: g['glowica_dekodera'] = True     # --head_lr_scale
+        g_groups = _cialo + _glowica
     elif args.encoder_only or args.stage2: g_groups = param_groups(enc_named, lr, no_decay_norms)
     else: g_groups = param_groups(enc_named + list(_mod(decoder).named_parameters()), lr, no_decay_norms)
     # stage 2: decoder groups after the encoder's, so a stage-1 optimizer state still loads
@@ -745,13 +749,20 @@ def main():
     if args.constant_lr:
         # Stałe tempo uczenia --lr od bieżącego kroku (pod WSM: model końcowy z uśrednienia punktów kontrolnych, bez wygaszania).
         for opt in (opt_g, opt_d):
-            for g in opt.param_groups: g['lr'] = g['initial_lr'] = lr
+            for g in opt.param_groups:
+                g['lr'] = g['initial_lr'] = lr * (args.head_lr_scale if g.get('glowica_dekodera') else 1.0)
         # z --lr_warmup: liniowo od 1% do --lr przez N kroków (licząc od startu tego przebiegu), potem stałe
         _w = args.lr_warmup
         _f = (lambda s: min(1.0, 0.01 + 0.99 * s / _w)) if _w else (lambda _: 1.0)
         schedulers = {k: torch.optim.lr_scheduler.LambdaLR(o, _f) for k, o in (('scheduler_g', opt_g), ('scheduler_d', opt_d))}
         lr_sched = schedulers['scheduler_g']
         if args.local_rank == 0: logger.info(f"Stałe tempo uczenia {lr} od kroku {step}" + (f", rozgrzewka {_w} kroków" if _w else ""))
+        if args.local_rank == 0 and args.decoder_only:
+            _opis = {}
+            for g in opt_g.param_groups:
+                _opis["głowica" if g.get('glowica_dekodera') else "ciało dekodera"] = g['initial_lr']
+            logger.info("Tempo docelowe: " + ", ".join(f"{k} {v:g}" for k, v in _opis.items())
+                        + (f"; ciało stoi przez pierwsze {args.head_warmup} kroków" if args.head_warmup else ""))
     if lr_schedule == 'plateau':
         dec_from = ckpt.get('dec_trainable_from', step) if args.stage2 else None   # the decoder lr ramps from here
         for i, g in enumerate(opt_g.param_groups):
