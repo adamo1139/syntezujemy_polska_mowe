@@ -387,3 +387,6 @@ Po 6000 krokach samej głowicy (WSM 4–6 tys.): prążki 1,46 w rekonstrukcji i
 (1,72), ale za dużo energii powyżej 8 kHz (bez dyskryminatorów). Błąd: głowica wpisała głośny ton w prążek
 Nyquista (24 kHz), którego żadna strata nie pilnuje — poprawka w `ISTFTHead`: prążki 0 Hz i 24 kHz zawsze zero.
 Dalej: wznowienie od kroku 6000 od razu z dyskryminatorami i odmrożoną resztą dekodera.
+Miary melowe nie widzą fazy ani tonu Nyquista (filtry na samej górze puste), więc punkt 6000 miał „dobre” liczby,
+a brzmiał źle. Dlatego UTMOS (przewidywana ocena słuchaczy): na 4 klipach VoxCPM2 oryginał 3,02, rekonstrukcja
+starym dekoderem 2,64, z modułem poprawki 2,67, głowica Vocos krok 6000 1,45; synteza CFG 4 / 16: 2,88 / 2,91 / 1,47.

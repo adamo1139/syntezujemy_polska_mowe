@@ -173,6 +173,17 @@ def linie_loss(y_hat, audio, sr=48000, hop=HOP, kmax=40, szer=2, tlo=100):
     return (wysokosc(x) - wysokosc(r)).clamp_min(0).mean()
 
 @torch.no_grad()
+def heldout_utmos(encoder, decoder, mel_transform, clips, device, model, sr):
+    """Średni UTMOS (przewidywana ocena słuchaczy) rekonstrukcji odłożonych klipów."""
+    from training.utmos import utmos
+    encoder.eval(); decoder.eval()
+    w = []
+    for wav in clips:
+        y = decoder(encoder(mel_transform(wav.to(device).unsqueeze(0)))).reshape(-1)[: wav.shape[-1]]
+        w.append(utmos(model, y.clamp(-1, 1), sr))
+    return sum(w) / len(w)
+
+@torch.no_grad()
 def heldout_linie(encoder, decoder, mel_transform, clips, device):
     """Średnia linie_loss na odłożonych klipach (całe klipy): nadmiar prążków co 93,75 Hz ponad oryginał."""
     encoder.eval(); decoder.eval()
@@ -557,6 +568,8 @@ def main():
     parser.add_argument('--heldout_every', type=int, default=0,
                         help='Every N steps score a fixed set of held-out clips (TensorBoard Loss/Heldout_*); with --avg_every use a multiple of it')
     parser.add_argument('--heldout_clips', type=int, default=64, help='Number of held-out clips for --heldout_every')
+    parser.add_argument('--heldout_utmos', action='store_true',
+                        help='W ocenie --heldout_every także UTMOS rekonstrukcji (Loss/Heldout_UTMOS; oryginały raz: Heldout_UTMOS_oryginal)')
     parser.add_argument('--heldout_max_sec', type=float, default=15.0, help='Held-out clips are cut to this many seconds')
     parser.add_argument('--num_workers', type=int, default=None, help='Data-loading processes per GPU (overrides ae.train.num_workers)')
     parser.add_argument('--avg_every', type=int, default=0,
@@ -978,7 +991,21 @@ def main():
                     _lin = heldout_linie(_mod(enc_ema), _mod(dec_ema), mel_transform_input, heldout["clips"], device)
                     set_train_modes()
                     writer.add_scalar("Loss/Heldout_Linie", _lin, step)
-                    logger.info(f"step {step}: odłożone klipy — recon {_rec:.4f}, log-mel całe pasmo {_full:.4f}, prążki {_lin:.4f} ({time.time() - _t:.1f} s)")
+                    _ut = ""
+                    if args.heldout_utmos:
+                        if "utmos" not in heldout:
+                            from training.utmos import wczytaj_utmos, utmos as _utmos_jeden
+                            heldout["utmos"] = wczytaj_utmos(device)
+                            heldout["utmos_oryginal"] = sum(_utmos_jeden(heldout["utmos"], c.to(device), data_cfg['sample_rate'])
+                                                            for c in heldout["clips"]) / len(heldout["clips"])
+                            logger.info(f"UTMOS oryginałów odłożonych klipów: {heldout['utmos_oryginal']:.3f}")
+                        _u = heldout_utmos(_mod(enc_ema), _mod(dec_ema), mel_transform_input, heldout["clips"], device,
+                                           heldout["utmos"], data_cfg['sample_rate'])
+                        set_train_modes()
+                        writer.add_scalar("Loss/Heldout_UTMOS", _u, step)
+                        writer.add_scalar("Loss/Heldout_UTMOS_oryginal", heldout["utmos_oryginal"], step)
+                        _ut = f", UTMOS {_u:.3f} (oryginały {heldout['utmos_oryginal']:.3f})"
+                    logger.info(f"step {step}: odłożone klipy — recon {_rec:.4f}, log-mel całe pasmo {_full:.4f}, prążki {_lin:.4f}{_ut} ({time.time() - _t:.1f} s)")
             if prof:
                 prof.mark("reszta pętli (harmonogram, uśrednianie, log, zapis)")
                 if prof.n == args.profile:

@@ -63,8 +63,13 @@ def main() -> None:
     p.add_argument("--max_sec", type=float, default=30.0, help="dłuższe klipy są pomijane (jak w treningu TTS)")
     p.add_argument("--zapisz", help="katalog na pary oryginał/rekonstrukcja do odsłuchu")
     p.add_argument("--ile_zapisz", type=int, default=5, help="ile par z każdego pliku CSV zapisać")
+    p.add_argument("--utmos", action="store_true", help="dodatkowo UTMOS (przewidywana ocena słuchaczy) oryginału i rekonstrukcji")
     p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     args = p.parse_args()
+    model_utmos = None
+    if args.utmos:
+        from training.utmos import wczytaj_utmos, utmos
+        model_utmos = wczytaj_utmos(torch.device(args.device))
 
     device = torch.device(args.device)
     cfg = json.load(open(args.config, encoding="utf-8"))
@@ -85,12 +90,12 @@ def main() -> None:
         os.makedirs(args.zapisz, exist_ok=True)
 
     naglowek = f"{'zbiór':<22} {'klipy':>6} {'h':>5} {'recon':>8} {'log-mel':>8} " + " ".join(
-        f"{f'LSD {od // 1000}-{do // 1000}k':>10}" for od, do in PASMA)
+        f"{f'LSD {od // 1000}-{do // 1000}k':>10}" for od, do in PASMA) + (f" {'UTMOS':>7} {'UTMOS oryg.':>11}" if model_utmos else "")
     wiersze = []
     for plik in args.val:
         t0 = time.time()
         nazwa = os.path.splitext(os.path.basename(plik))[0].replace("bluetts_", "")
-        sumy, n, sekundy, pominiete = np.zeros(2 + len(PASMA)), 0, 0.0, 0
+        sumy, n, sekundy, pominiete = np.zeros(2 + len(PASMA) + (2 if model_utmos else 0)), 0, 0.0, 0
         for i, sciezka in enumerate(sciezki_z_csv(plik)):
             x, sr_x = sf.read(sciezka, dtype="float32", always_2d=True)
             x = torch.from_numpy(x).mean(dim=1)
@@ -107,6 +112,8 @@ def main() -> None:
                 x1, y1 = x.view(1, 1, -1), y.view(1, 1, -1)
                 wartosci = [recon_l1(x1, y1, miary["recon"]).item(), recon_l1(x1, y1, miary["logmel"]).item()]
             wartosci += lsd_pasma(x, y, sr)
+            if model_utmos:
+                wartosci += [utmos(model_utmos, y.clamp(-1, 1), sr), utmos(model_utmos, x, sr)]
             sumy += wartosci; n += 1; sekundy += dl / sr
             if args.zapisz and i < args.ile_zapisz:
                 baza = os.path.join(args.zapisz, f"{nazwa}_{i:02d}")
@@ -114,7 +121,8 @@ def main() -> None:
                 sf.write(baza + "_kodek.wav", y.clamp(-1, 1).cpu().numpy(), sr)
         sr_w = sumy / max(n, 1)
         wiersze.append(f"{nazwa:<22} {n:>6} {sekundy / 3600:>5.2f} {sr_w[0]:>8.4f} {sr_w[1]:>8.4f} "
-                       + " ".join(f"{v:>10.2f}" for v in sr_w[2:]))
+                       + " ".join(f"{v:>10.2f}" for v in sr_w[2:2 + len(PASMA)])
+                       + (f" {sr_w[-2]:>7.3f} {sr_w[-1]:>11.3f}" if model_utmos else ""))
         print(f"  {nazwa}: {n} klipów ({pominiete} pominiętych > {args.max_sec:g} s) w {time.time() - t0:.0f} s", flush=True)
     print("\n" + naglowek)
     for w in wiersze:
