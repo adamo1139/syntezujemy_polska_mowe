@@ -20,7 +20,7 @@ Trzy kroki (każdy wznawialny, wyniki w katalogu --praca, domyślnie <katalog sy
 Przykład (karty 1,2,3,5,6,7, środowisko z `uv pip install moondream sentence-transformers morfeusz2 rapidfuzz`):
 
   python skrypty/czysc_asr.py asr wyniki/poziomka_liczby_slownie --karty 1,2,3,5,6,7
-  python skrypty/czysc_asr.py ocen wyniki/poziomka_liczby_slownie --probki 40
+  python skrypty/czysc_asr.py ocen wyniki/poziomka_liczby_slownie --probki 40 --usun-bez-asr
 """
 
 from __future__ import annotations
@@ -212,8 +212,9 @@ def krok_ocen(args) -> None:
                 x = json.loads(w)
                 asr[x["id"]] = x["asr"]
     klipy = [w for w in wczytaj_manifest(katalog) if w["id"] in asr]
-    brak = len(wczytaj_manifest(katalog)) - len(klipy)
-    print(f"{len(klipy)} klipów z transkrypcją, {brak} bez (te nie są oceniane)")
+    bez_asr = [w for w in wczytaj_manifest(katalog) if w["id"] not in asr]
+    print(f"{len(klipy)} klipów z transkrypcją, {len(bez_asr)} bez"
+          + (" (idą do usun.txt: --usun-bez-asr)" if args.usun_bez_asr else " (nie są oceniane ani usuwane)"))
     if not klipy:
         sys.exit("Brak transkrypcji: najpierw krok asr.")
 
@@ -269,7 +270,8 @@ def krok_ocen(args) -> None:
     with (praca / "oceny.jsonl").open("w", encoding="utf-8") as plik:
         for o in oceny:
             plik.write(json.dumps(o, ensure_ascii=False) + "\n")
-    (praca / "usun.txt").write_text("".join(o["id"] + "\n" for o in usun), encoding="utf-8")
+    usun_bez_asr = bez_asr if args.usun_bez_asr else []
+    (praca / "usun.txt").write_text("".join(o["id"] + "\n" for o in usun + usun_bez_asr), encoding="utf-8")
     (praca / "odsluch.txt").write_text("".join(o["id"] + "\n" for o in odsluch), encoding="utf-8")
 
     h = lambda xs: sum(x["sekundy"] for x in xs) / 3600  # noqa: E731
@@ -277,7 +279,8 @@ def krok_ocen(args) -> None:
         f"klipów ocenionych: {len(oceny)} ({h(oceny):.1f} h)",
         f"mediana CER {statistics.median(o['cer'] for o in oceny):.3f}, WER {statistics.median(o['wer'] for o in oceny):.3f}, "
         f"tempo {med:.1f} znaków/s",
-        f"do usunięcia: {len(usun)} ({len(usun) / len(oceny):.1%}, {h(usun):.1f} h)",
+        f"do usunięcia: {len(usun)} ({len(usun) / len(oceny):.1%}, {h(usun):.1f} h)"
+        + (f" + {len(usun_bez_asr)} bez transkrypcji ({h(usun_bez_asr):.1f} h)" if usun_bez_asr else ""),
         f"do odsłuchu (granica): {len(odsluch)} ({h(odsluch):.1f} h)",
         "powody (klip może mieć kilka):",
     ]
@@ -327,6 +330,8 @@ def main() -> None:
     o.add_argument("--embeddingi", default="intfloat/multilingual-e5-large")
     o.add_argument("--urzadzenie", default="cuda")
     o.add_argument("--bez-embeddingow", action="store_true")
+    o.add_argument("--usun-bez-asr", action="store_true",
+                   help="klipy bez transkrypcji (ASR się nie udał, np. przester) też do usun.txt")
     o.add_argument("--max-cer", type=float, default=0.15, help="powyżej: usuń")
     o.add_argument("--min-cos", type=float, default=0.85, help="poniżej: usuń")
     o.add_argument("--min-brak", type=int, default=2, help="tyle niewypowiedzianych słów na końcu: usuń")
