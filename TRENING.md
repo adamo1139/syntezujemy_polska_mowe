@@ -207,8 +207,9 @@ skopiuj wybrany do pustego katalogu i podaj go jako `--out` (albo przenieś nows
   ok. 18 klipów na partię. `ttl.train.amp` = `bf16`: autocast dla enkoderów i pola wektorowego, strata w float32.
   Budżet zmienia `--batch_seconds`; przy OOM zmniejszyć, przy dużym zapasie pamięci zwiększyć.
 - **Długość treningu i progi:** plan 100 tys. kroków (2026-11-21), potem 500 tys.; SPFM wyłączony
-  (`ttl.train.spfm_enabled`, 2026-11-22: tylko ok. 0,06% brudnych klipów); RSF od 150 000 (`ttl.rsf.start_step`,
-  2026-11-22, wcześniej 50 000; oryginał 200 000).
+  (`ttl.train.spfm_enabled`, 2026-11-22: tylko ok. 0,06% brudnych klipów); RSF wyłączony (`ttl.rsf.enabled`, 2026-11-23):
+  włączony od kroku 150 000 podniósł `val/loss` w kroku 155 000 do poziomu z ok. 70 000, trening cofnięty do
+  punktu 150 000 (ostatni bez RSF). Wcześniej plan: od 50 000, potem od 150 000; oryginał 200 000.
 - **Weights & Biases:** `--wandb PROJEKT` (raz na rigu `wandb login`). Co `--log_every` kroków (10) średnie: strata,
   tempo uczenia, kroki/s, klipy i sekundy audio na sekundę (wszystkie karty), klipy na partię, dopełnienie,
   MFU i TFLOPS na kartę, szczyt pamięci; co epokę SPFM; co 5000 kroków próbki odsłuchowe. Sesja jest zapisana
@@ -321,3 +322,38 @@ python usrednij_dp.py --punkty ../modele/dp/duration_predictor_wsm.pt ../modele/
   --val ../dane/bluetts_val_liczby.csv --device cuda:1
 # w poleceniu treningu: --val_data ../dane/bluetts_val.csv ../dane/bluetts_val_liczby.csv
 ```
+
+## 7. Brzmienie syntezy: odsłuchy i wybrany łańcuch (2026-11-23)
+
+Problem: synteza modelu tekst→latenty (punkt 115k) ma „cierpkość”, której nie ma w nagraniach VoxCPM2.
+Test na 4 klipach z datasetu (ten sam tekst: oryginał, rekonstrukcja kodekiem, synteza): rekonstrukcja samym
+kodekiem brzmi gorzej od oryginału, więc część winy leży w dekoderze kodeka. Kodek dokłada ok. 9,5 dB szumu
+powyżej 12 kHz (oryginały VoxCPM2 prawie nie mają treści powyżej 14–16 kHz), ale ręczne wyciszenie góry
+(−10 dB, obcięcie, korektor do oryginału) nie pomogło na ucho. Ustawienia syntezy (CFG 1–4, 4–100 kroków,
+wagi bieżące/EMA) zmieniają barwę o ułamki dB; powyżej ok. 32 kroków nic się już nie zmienia.
+
+**Najlepiej brzmiący łańcuch (odsłuch):** wagi EMA, CFG 4, 16 kroków → Sidon v0.1 (jedno przejście) → korektor
+w całości (`115k_ema_cfg4_k16_sidon_eq100.wav`).
+
+- **Sidon v0.1** (`sarulab-speech/sidon-v0.1`, MIT): odtwarza mowę od nowa z cech w2v-BERT 2.0, 48 kHz, ok. 0,8 s
+  na 10 s audio na RTX 5080; ścieżka jak w demo `sidon_demo_beta` (`sidon/uruchom_sidon.py`). Sam Sidon brzmi
+  „za głęboko”: pasmo 4–8 kHz ok. 13 dB ciemniejsze niż VoxCPM2. Tylko jedno przejście: każde kolejne opóźnia
+  mowę o ok. 10 ms i ją rozmywa (×10 wyraźnie gorzej, ×100 bełkot).
+- **Korektor:** stała krzywa (pasma 1/3 oktawy, wygładzona) z różnicy średnich widm oryginałów VoxCPM2 i tych
+  samych oryginałów po Sidonie. W dB: 500 Hz +2,1 · 1 kHz +1,5 · 2 kHz +6,1 · 3 kHz +9,3 · 4 kHz +7,8 ·
+  6 kHz +11,8 · 8 kHz +7,4 · 10 kHz +4,7 · 12 kHz +4,6 · 16 kHz +1,2 · 20 kHz −5,3. Krzywa:
+  `syntezy/porownanie_voxcpm/korektor_sidona_db.npy` (wiersz 0: częstotliwości STFT 2048, wiersz 1: dB),
+  skrypt `syntezy/korektor_sidona.py`.
+- Odrzucone: AudioSR (zmienia tylko pasmo > 12 kHz), MossFormer2 SE/SR 48K (trzaski), VoiceFixer, Resemble
+  Enhance (44,1 kHz), DialogueSidon2 (24 kHz, CC BY-NC), mieszanie przebiegów Sidon/wejście (faza Sidona
+  niezgodna z wejściem → filtr grzebieniowy).
+
+**Bez Sidona też brzmi dobrze (odsłuch):** synteza EMA, CFG 4, 16 kroków + sam korektor, w dwóch wersjach:
+(a) ta sama krzywa co po Sidonie (mocno rozjaśnia: 4–8 kHz ok. 10 dB jaśniej niż VoxCPM2), (b) krzywa dopasowana
+wprost do różnicy synteza → oryginały VoxCPM2 (`syntezy/porownanie_voxcpm/korektor_tts_cfg4_db.npy`; lekkie
+przyciemnienie 2–12 kHz o 1–2 dB względem 1 kHz i ścięcie powyżej 16 kHz: −13 dB przy 16 kHz, −26 dB przy
+20 kHz). Sam korektor jest tani, deterministyczny i nie odtwarza głosu od nowa, więc to kandydat na prostszy
+łańcuch niż Sidon.
+
+Pliki odsłuchów i skrypty leżą lokalnie, poza gitem: `audiosr/`, `sidon/`, `ulepszacze/`, `syntezy/`.
+Następny krok: wbudować łańcuch (Sidon + korektor) w `trening/syntezuj.py` jako opcję.
