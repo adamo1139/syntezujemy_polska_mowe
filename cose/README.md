@@ -24,6 +24,9 @@ parach `noisy` = rekonstrukcja kodekiem, `clean` = oryginał VoxCPM2, z `trening
   każdej porcji, rozmiar zbioru walidacyjnego `min(20, plików)` zamiast stałych 20;
 - próbkowanie na urządzeniu modelu zamiast `.cuda()`; punkty kontrolne w `<log_dir>/checkpoints` zamiast bieżącego katalogu;
 - `wandb` opcjonalne.
+- krok COSE: przewidywania `u2` i `u1`, z których powstaje cel (i tak odcinany od gradientu), liczone bez gradientu —
+  ten sam trening przy ok. 1/3 pamięci (oryginał trzymał graf trzech przejść sieci);
+- opcja `--precision` (np. `bf16-mixed`).
 
 ## Środowisko (osobne, nowy PyTorch)
 

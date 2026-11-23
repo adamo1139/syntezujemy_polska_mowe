@@ -179,9 +179,12 @@ class ScoreModel(pl.LightningModule):
             x_T = torch.randn_like(x)  
             x_t = (1 - texp) * x + texp * x_T
             v = x_T - x
-            u2 = self.dnn(x_t, t, s, y=y)  
-            x_s = x_t - (t - s).view([b, *([1] * len(x.shape[1:]))]) * u2
-            u1 = self.dnn(x_s, s, r, y=y)
+            # [syntezujemy_polska_mowe] u2 i u1 tworzą tylko cel, który i tak jest odcinany (.detach() niżej): liczone
+            # bez gradientu ten sam trening zajmuje ok. 1/3 pamięci (graf tylko dla u_tr)
+            with torch.no_grad():
+                u2 = self.dnn(x_t, t, s, y=y)
+                x_s = x_t - (t - s).view([b, *([1] * len(x.shape[1:]))]) * u2
+                u1 = self.dnn(x_s, s, r, y=y)
             u_tr = self.dnn(x_t, t, r, y=y)
             target_u = ((1 - lambda_param).view(-1, 1, 1, 1) * u1 + lambda_param.view(-1, 1, 1, 1) * u2).detach()
             loss_COSE = self._loss(forward_out = u_tr, x_t = target_u)

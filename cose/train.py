@@ -55,6 +55,8 @@ if __name__ == '__main__':
      trainer_parser.add_argument("--devices", default="auto", help="How many gpus to use.")
      trainer_parser.add_argument("--accumulate_grad_batches", type=int, default=1, help="Accumulate gradients.")
      trainer_parser.add_argument("--max_epochs", type=int, default=-1, help="Number of epochs to train.")
+     trainer_parser.add_argument("--precision", type=str, default="32-true",
+          help="[syntezujemy_polska_mowe] precyzja Lightning, np. bf16-mixed (mniej pamięci, szybciej)")
      
      ScoreModel.add_argparse_args(
           parser.add_argument_group("ScoreModel", description=ScoreModel.__name__))
