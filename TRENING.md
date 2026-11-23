@@ -390,3 +390,27 @@ Dalej: wznowienie od kroku 6000 od razu z dyskryminatorami i odmrożoną resztą
 Miary melowe nie widzą fazy ani tonu Nyquista (filtry na samej górze puste), więc punkt 6000 miał „dobre” liczby,
 a brzmiał źle. Dlatego UTMOS (przewidywana ocena słuchaczy): na 4 klipach VoxCPM2 oryginał 3,02, rekonstrukcja
 starym dekoderem 2,64, z modułem poprawki 2,67, głowica Vocos krok 6000 1,45; synteza CFG 4 / 16: 2,88 / 2,91 / 1,47.
+
+**Głowica Vocos porzucona (2026-11-23).** Po włączeniu dyskryminatorów (od kroku 6000) `Heldout_UTMOS` na 64
+odłożonych klipach wzrósł do 2,455 przy kroku 11 500 (oryginały 2,973), potem powoli spadał (12 000: 2,449,
+dalej 2,427) — szczyt poniżej starego dekodera. Prążki usunęła (1,3–1,5, poniżej oryginału), ale nie dogoniła
+jakości starej głowicy uczonej 220 tys. kroków razem z ciałem dekodera; przewidywanie fazy wymagałoby znacznie
+dłuższego treningu. Do ewentualnego powrotu przy następnym kodeku trenowanym od zera (ciało od początku pod tę
+głowicę). **Dekoder w użyciu: `kodek_48k_postnet/ae_wsm_6_9.pt`** (stara głowica + moduł poprawki; enkoder bez
+zmian, więc latenty i model tekst→latenty bez zmian).
+
+Porównanie na pełnej walidacji (`ocen_kodek_val.py --utmos`; UTMOS im wyżej, tym lepiej):
+
+| dekoder | recon | log-mel | LSD 0–8k | LSD 8–16k | LSD 16–24k | UTMOS val | UTMOS val_liczby |
+|---|---|---|---|---|---|---|---|
+| stary `ae_wsm_210_220` | 1,142 | 0,586 | 7,61 | 10,55 | 24,82 | 2,739 | 2,624 |
+| moduł poprawki `ae_wsm_6_9` | 1,130 | 0,381 | 7,62 | 9,24 | 12,04 | 2,755 | 2,643 |
+| głowica Vocos `ae_wsm_11_13` | 1,765 | 0,310 | 7,73 | 8,35 | 8,43 | 2,445 | 2,317 |
+| oryginał VoxCPM2 | | | | | | 2,996 | 2,858 |
+
+Moduł poprawki to tylko mały zysk; brzmienie dalej odstaje od oryginału — dalsze badania: generatywny postfiltr.
+
+**Liczby czytane źle: winny nauczyciel.** Whisper large-v3-turbo na 8 klipach z liczbami: podobieństwo transkrypcji
+do tekstu — oryginał VoxCPM2 0,972, rekonstrukcja starym dekoderem 0,970, z modułem poprawki 0,970, synteza
+modelem 115k 0,979. Kodek niczego nie psuje; błędy są już w nagraniach VoxCPM2 („20 tys. zł” → „20 Tysu Dzeko”,
+„1,5 godziny” → „7 godziny”, „np. do 1 kV” → bełkot). Wyjście: zamiana liczb na słowa przed syntezą.
