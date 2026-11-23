@@ -33,12 +33,40 @@ class SameConv1d(nn.Conv1d):
             x = torch.nn.functional.pad(x, (self._edge_pad, self._edge_pad), mode="replicate")
         return super().forward(x)
 
+class AktywacjaOkresowa(nn.Module):
+    """[syntezujemy_polska_mowe] Aktywacja z wbudowaną okresowością (BigVGAN, DAC, Code2Wav Qwen3-Omni), na kanał.
+
+    tryb "snakebeta": x + sin²(αx) / β, α = e^a, β = e^b (a, b uczone, start 0) — do treningu od zera.
+    tryb "gelu_snake": GELU(x) + g · sin²(αx), g uczone od zera — na starcie dokładnie GELU, więc da się dostrajać
+    dekoder wytrenowany z GELU (składnik okresowy dochodzi stopniowo)."""
+    def __init__(self, channels, tryb="snakebeta"):
+        super().__init__()
+        if tryb not in ("snakebeta", "gelu_snake"):
+            raise ValueError(f"nieznany tryb aktywacji {tryb!r}")
+        self.tryb = tryb
+        self.log_alpha = nn.Parameter(torch.zeros(1, channels, 1))
+        if tryb == "snakebeta":
+            self.log_beta = nn.Parameter(torch.zeros(1, channels, 1))
+        else:
+            self.g = nn.Parameter(torch.zeros(1, channels, 1))
+
+    def forward(self, x):
+        okres = torch.sin(x * self.log_alpha.exp()) ** 2
+        if self.tryb == "snakebeta":
+            return x + okres / (self.log_beta.exp() + 1e-9)
+        return torch.nn.functional.gelu(x) + self.g * okres
+
+
+def zrob_aktywacje(channels, aktywacja="gelu"):
+    return nn.GELU() if aktywacja == "gelu" else AktywacjaOkresowa(channels, aktywacja)
+
+
 class ConvNeXtBlock(nn.Module):
     """
     1D ConvNeXt Block with Dilation support.
     """
     def __init__(self, dim=512, intermediate_dim=2048, kernel_size=7, dilation=1, layer_scale_init_value=1e-6,
-                 pad_mode="zeros"):
+                 pad_mode="zeros", aktywacja="gelu"):
         super().__init__()
         
         self.dwconv = SameConv1d(
@@ -50,7 +78,7 @@ class ConvNeXtBlock(nn.Module):
         )
         self.norm = LayerNorm1d(dim)
         self.pwconv1 = nn.Conv1d(dim, intermediate_dim, kernel_size=1)
-        self.act = nn.GELU()
+        self.act = zrob_aktywacje(intermediate_dim, aktywacja)
         self.pwconv2 = nn.Conv1d(intermediate_dim, dim, kernel_size=1)
         
         self.gamma = nn.Parameter(torch.ones(1, dim, 1) * layer_scale_init_value)
@@ -100,13 +128,13 @@ class CausalConvNeXtBlock(nn.Module):
     1D Causal ConvNeXt Block with Dilation support.
     """
     def __init__(self, dim=512, intermediate_dim=2048, kernel_size=7, dilation=1, layer_scale_init_value=1e-6,
-                 pad_mode="zeros"):
+                 pad_mode="zeros", aktywacja="gelu"):
         super().__init__()
 
         self.dwconv = CausalDWConv1d(dim, kernel_size=kernel_size, dilation=dilation, pad_mode=pad_mode)
         self.norm = LayerNorm1d(dim)
         self.pwconv1 = nn.Conv1d(dim, intermediate_dim, kernel_size=1)
-        self.act = nn.GELU()
+        self.act = zrob_aktywacje(intermediate_dim, aktywacja)
         self.pwconv2 = nn.Conv1d(intermediate_dim, dim, kernel_size=1)
 
         self.gamma = nn.Parameter(torch.ones(1, dim, 1) * layer_scale_init_value)

@@ -107,12 +107,13 @@ class STFTPostnet(nn.Module):
     (wyrównane do ramek STFT). Moduł nie jest przyczynowy: patrzy num_layers · (ksz − 1) / 2 ramek w obie strony."""
 
     def __init__(self, feat_dim=512, n_fft=2048, hop=512, dim=384, intermediate_dim=1152, num_layers=4, ksz=7,
-                 max_mask=4.0):
+                 max_mask=4.0, aktywacja="gelu"):
         super().__init__()
         self.n_fft, self.hop, self.max_mask = n_fft, hop, max_mask
         nb = n_fft // 2 + 1
         self.proj_in = nn.Conv1d(2 * nb + feat_dim, dim, kernel_size=1)
-        self.blocks = nn.ModuleList([ConvNeXtBlock(dim=dim, intermediate_dim=intermediate_dim, kernel_size=ksz)
+        self.blocks = nn.ModuleList([ConvNeXtBlock(dim=dim, intermediate_dim=intermediate_dim, kernel_size=ksz,
+                                                   aktywacja=aktywacja)
                                      for _ in range(num_layers)])
         self.proj_out = nn.Conv1d(dim, 2 * nb, kernel_size=1)
         nn.init.zeros_(self.proj_out.weight)
@@ -148,6 +149,54 @@ DEFAULT_DECODER_CFG = {
 }
 REPLICATE_DECODER_CFG = {**DEFAULT_DECODER_CFG, "pad_mode": "replicate"}
 
+class PrzedniaSiec(nn.Module):
+    """[syntezujemy_polska_mowe] Transformer przy niskiej częstotliwości klatek (latenty ściśnięte ×6, 15,6 Hz przy
+    48 kHz), przed rozpakowaniem do 93,75 Hz — jak pre_transformer w Code2Wav Qwen3-Omni. Parametr kosztuje tu
+    6 razy mniej niż w ciele dekodera. Przyczynowy, attention w oknie `okno` klatek wstecz (RoPE, pre-RMSNorm,
+    SwiGLU), więc dekoder zostaje strumieniowalny. Wyjście dodawane rezydualnie do latentów; ostatnia warstwa od
+    zer, więc na starcie dekoder daje dokładnie to samo co bez niej."""
+
+    def __init__(self, idim=24, ccf=6, dim=512, num_layers=7, heads=8, ffn=2048, okno=64):
+        super().__init__()
+        self.ccf, self.heads, self.okno = ccf, heads, okno
+        self.inp = nn.Linear(idim * ccf, dim)
+        self.warstwy = nn.ModuleList([nn.ModuleDict({
+            "n1": nn.RMSNorm(dim), "qkv": nn.Linear(dim, 3 * dim, bias=False), "o": nn.Linear(dim, dim, bias=False),
+            "n2": nn.RMSNorm(dim), "w13": nn.Linear(dim, 2 * ffn, bias=False), "w2": nn.Linear(ffn, dim, bias=False),
+        }) for _ in range(num_layers)])
+        self.norm = nn.RMSNorm(dim)
+        self.out = nn.Linear(dim, idim * ccf)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+
+    def _rope(self, x):   # x [B, H, T, d]
+        T, d = x.shape[-2], x.shape[-1]
+        f = 1.0 / (10000 ** (torch.arange(0, d, 2, device=x.device, dtype=torch.float32) / d))
+        k = torch.arange(T, device=x.device, dtype=torch.float32)[:, None] * f[None]
+        c, s_ = k.cos().to(x.dtype), k.sin().to(x.dtype)
+        x1, x2 = x[..., 0::2], x[..., 1::2]
+        return torch.stack([x1 * c - x2 * s_, x1 * s_ + x2 * c], dim=-1).flatten(-2)
+
+    def forward(self, x):   # x [B, idim, T] przy pełnej częstotliwości klatek -> to samo
+        B, C, T = x.shape
+        pad = (-T) % self.ccf
+        xp = F.pad(x, (0, pad), mode="replicate") if pad else x
+        L = xp.shape[-1] // self.ccf
+        z = xp.view(B, C, L, self.ccf).permute(0, 1, 3, 2).reshape(B, C * self.ccf, L)   # jak compress_latents
+        h = self.inp(z.transpose(1, 2))                                                   # [B, L, dim]
+        i = torch.arange(L, device=x.device)
+        maska = (i[None, :] <= i[:, None]) & (i[:, None] - i[None, :] < self.okno)        # przyczynowo, w oknie
+        for w in self.warstwy:
+            q, k, v = w["qkv"](w["n1"](h)).view(B, L, 3, self.heads, -1).permute(2, 0, 3, 1, 4)
+            a = F.scaled_dot_product_attention(self._rope(q), self._rope(k), v, attn_mask=maska)
+            h = h + w["o"](a.transpose(1, 2).reshape(B, L, -1))
+            g, u = w["w13"](w["n2"](h)).chunk(2, dim=-1)
+            h = h + w["w2"](F.silu(g) * u)
+        dz = self.out(self.norm(h)).transpose(1, 2)                                       # [B, C*ccf, L]
+        dx = dz.view(B, C, self.ccf, L).permute(0, 1, 3, 2).reshape(B, C, L * self.ccf)   # rozpakowanie
+        return x + dx[..., :T]
+
+
 class LatentDecoder1D(nn.Module):
     def __init__(self, cfg=None):
         super().__init__()
@@ -173,6 +222,13 @@ class LatentDecoder1D(nn.Module):
         self.register_buffer('latent_mean', torch.zeros(1, in_channels, 1), persistent=False)
         self.register_buffer('latent_std', torch.ones(1, in_channels, 1), persistent=False)
 
+        aktywacja = cfg.get('aktywacja', 'gelu')   # gelu | gelu_snake | snakebeta (ciało dekodera i moduł poprawki)
+        pre = cfg.get('prenet')
+        self.prenet = None
+        if pre:
+            self.prenet = PrzedniaSiec(idim=in_channels, ccf=int(pre.get('ccf', 6)), dim=int(pre.get('dim', 512)),
+                                       num_layers=int(pre.get('num_layers', 7)), heads=int(pre.get('heads', 8)),
+                                       ffn=int(pre.get('ffn', 2048)), okno=int(pre.get('okno', 64)))
         self.embed = CausalInputProjection(in_channels, dim, kernel_size=kernel_size, pad_mode=pad_mode)
 
         self.convnext = nn.ModuleList([
@@ -182,6 +238,7 @@ class LatentDecoder1D(nn.Module):
                 kernel_size=kernel_size, 
                 dilation=d,
                 pad_mode=pad_mode,
+                aktywacja=aktywacja,
             )
             for d in dilations
         ])
@@ -195,7 +252,7 @@ class LatentDecoder1D(nn.Module):
                 feat_dim=dim, n_fft=int(pn.get('n_fft', 2048)), hop=int(cfg['head'].get('hop', cfg['head']['odim'])),
                 dim=int(pn.get('dim', 384)), intermediate_dim=int(pn.get('intermediate_dim', 1152)),
                 num_layers=int(pn.get('num_layers', 4)), ksz=int(pn.get('ksz', 7)),
-                max_mask=float(pn.get('max_mask', 4.0)),
+                max_mask=float(pn.get('max_mask', 4.0)), aktywacja=aktywacja,
             )
 
         head_cfg = cfg['head']
@@ -288,6 +345,8 @@ class LatentDecoder1D(nn.Module):
     def forward(self, x):
         x = self._prepare_latents(x)
         x = x * self.latent_std + self.latent_mean
+        if self.prenet is not None:
+            x = self.prenet(x)
 
         x = self.embed(x)
         for block in self.convnext:

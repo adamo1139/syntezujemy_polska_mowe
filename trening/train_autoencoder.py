@@ -268,6 +268,12 @@ def random_crop(audio, y_hat, crop_len, limit):
     start = torch.randint(0, limit - crop_len + 1, (1,)).item()
     return audio[..., start : start + crop_len], y_hat[..., start : start + crop_len]
 
+def _skrot_nazw(nazwy):
+    """Nazwy tensorów zgrupowane po prefiksie bez numerów warstw, np. 'prenet.warstwy.*.qkv.weight ×7'."""
+    import re
+    c = collections.Counter(re.sub(r"\.\d+\.", ".*.", n) for n in nazwy)
+    return ", ".join(f"{k} ×{v}" if v > 1 else k for k, v in sorted(c.items()))
+
 def recon_l1(real, fake, mel_transforms):
     # squeeze per transform: one shared view changes the order in which gradients accumulate
     loss = sum(F.l1_loss(tf(real.squeeze(1)), tf(fake.squeeze(1))) for tf in mel_transforms)
@@ -652,6 +658,17 @@ def main():
     parser.add_argument('--decoder_postnet', action='store_true',
                         help='Moduł poprawki na wyjściu dekodera (STFTPostnet: maska widma, start od tożsamości); '
                              'z --head_warmup i --head_lr_scale „nową częścią” jest ten moduł, a nie głowica')
+    parser.add_argument('--decoder_prenet', action='store_true',
+                        help='Przednia sieć dekodera: transformer przy 15,6 Hz (latenty ściśnięte ×6), przyczynowy, okno; '
+                             'ostatnia warstwa od zer. Z --head_warmup „nową częścią” jest ona (i parametry aktywacji okresowej)')
+    parser.add_argument('--prenet_dim', type=int, default=512)
+    parser.add_argument('--prenet_layers', type=int, default=7)
+    parser.add_argument('--prenet_heads', type=int, default=8)
+    parser.add_argument('--prenet_ffn', type=int, default=2048, help='Szerokość SwiGLU (7 warstw × 512/2048 ≈ 29,5M)')
+    parser.add_argument('--prenet_okno', type=int, default=64, help='Okno attention w klatkach 15,6 Hz (64 ≈ 4,1 s wstecz)')
+    parser.add_argument('--decoder_act', choices=['gelu', 'gelu_snake', 'snakebeta'], default=None,
+                        help='Aktywacja w ciele dekodera i module poprawki: gelu (jak dotąd), gelu_snake (GELU + składnik '
+                             'okresowy od zera, do dostrajania), snakebeta (do treningu od zera)')
     parser.add_argument('--postnet_dim', type=int, default=384)
     parser.add_argument('--postnet_layers', type=int, default=4)
     parser.add_argument('--head_warmup', type=int, default=0,
@@ -763,8 +780,21 @@ def main():
     if args.decoder_postnet:
         decoder_cfg['postnet'] = {'dim': args.postnet_dim, 'intermediate_dim': 3 * args.postnet_dim,
                                   'num_layers': args.postnet_layers, 'ksz': 7, 'n_fft': 2048}
-    # część dekodera uczona od nowa (--head_warmup zamraża resztę, --head_lr_scale mnoży jej tempo)
-    nowa_czesc = 'postnet.' if decoder_cfg.get('postnet') else 'head.'
+    if args.decoder_prenet:
+        decoder_cfg['prenet'] = {'dim': args.prenet_dim, 'num_layers': args.prenet_layers, 'heads': args.prenet_heads,
+                                 'ffn': args.prenet_ffn, 'okno': args.prenet_okno, 'ccf': 6}
+    if args.decoder_act: decoder_cfg['aktywacja'] = args.decoder_act
+    # część dekodera uczona od nowa (--head_warmup zamraża resztę, --head_lr_scale mnoży jej tempo): przednia sieć
+    # i parametry aktywacji okresowej, jeśli są; inaczej moduł poprawki albo głowica
+    if decoder_cfg.get('prenet') or decoder_cfg.get('aktywacja', 'gelu') != 'gelu':
+        nowa_czesc = tuple((['prenet.'] if decoder_cfg.get('prenet') else []) +
+                           (['__akt__'] if decoder_cfg.get('aktywacja', 'gelu') != 'gelu' else []))
+    else:
+        nowa_czesc = ('postnet.',) if decoder_cfg.get('postnet') else ('head.',)
+    nazwa_nowej = ", ".join("aktywacja okresowa" if p == '__akt__' else p.rstrip('.') for p in nowa_czesc)
+    def czy_nowa(nazwa):
+        return any(nazwa.startswith(p) for p in nowa_czesc if p != '__akt__') or \
+            ('__akt__' in nowa_czesc and '.act.' in nazwa)
     ae_cfg = {**ae_cfg, 'decoder': decoder_cfg}   # zapisywane w punktach kontrolnych: dalsze skrypty budują ten sam dekoder
     if args.head_warmup and not args.decoder_only: raise SystemExit("--head_warmup tylko z --decoder_only")
     ckpt = torch.load(args.resume, map_location='cpu') if args.resume else None
@@ -819,9 +849,9 @@ def main():
     enc_named = list(_mod(encoder).named_parameters())
     if args.decoder_only:
         _dec = list(_mod(decoder).named_parameters())
-        _cialo = param_groups([(n, p) for n, p in _dec if not n.startswith(nowa_czesc)], lr, no_decay_norms)
+        _cialo = param_groups([(n, p) for n, p in _dec if not czy_nowa(n)], lr, no_decay_norms)
         for g in _cialo: g['cialo_dekodera'] = True   # --head_warmup: tempo 0 przez pierwsze kroki
-        _glowica = param_groups([(n, p) for n, p in _dec if n.startswith(nowa_czesc)], lr, no_decay_norms)
+        _glowica = param_groups([(n, p) for n, p in _dec if czy_nowa(n)], lr, no_decay_norms)
         for g in _glowica: g['glowica_dekodera'] = True     # --head_lr_scale
         g_groups = _cialo + _glowica
     elif args.encoder_only or args.stage2: g_groups = param_groups(enc_named, lr, no_decay_norms)
@@ -864,8 +894,10 @@ def main():
         _mod(encoder).load_state_dict({k.replace('module.', ''): v for k, v in _ae['encoder'].items()}, strict=True)
         _sd = {k.replace('module.', ''): v for k, v in _ae['decoder'].items()}
         _dek_stary = _ae.get('ae_config', {}).get('decoder', {})
-        _glowica_stara = _dek_stary.get('head', {}).get('type', 'patch') + (' + postnet' if _dek_stary.get('postnet') else '')
-        _glowica_nowa = decoder_cfg['head'].get('type', 'patch') + (' + postnet' if decoder_cfg.get('postnet') else '')
+        def _opis_dek(c):
+            return (c.get('head', {}).get('type', 'patch') + (f" + postnet{c['postnet'].get('num_layers', 4)}" if c.get('postnet') else '')
+                    + (' + prenet' if c.get('prenet') else '') + (f" + {c['aktywacja']}" if c.get('aktywacja', 'gelu') != 'gelu' else ''))
+        _glowica_stara, _glowica_nowa = _opis_dek(_dek_stary), _opis_dek(decoder_cfg)
         if _glowica_stara == _glowica_nowa:
             _mod(decoder).load_state_dict(_sd, strict=True)
         else:
@@ -875,7 +907,7 @@ def main():
             _mod(decoder).load_state_dict(_zgodne, strict=False)
             if args.local_rank == 0:
                 logger.info(f"Głowica {_glowica_stara} -> {_glowica_nowa}: z {args.init_ae} przeniesiono {len(_zgodne)} tensorów, "
-                            f"od zera: {sorted(k for k in _cel if k not in _zgodne)}")
+                            f"od zera: {_skrot_nazw(k for k in _cel if k not in _zgodne)}")
         if args.local_rank == 0:
             from training.utils import encoder_fingerprint
             logger.info(f"Kodek startowy {args.init_ae}: enkoder {encoder_fingerprint(_mod(encoder).state_dict())[:12]}"
@@ -909,7 +941,7 @@ def main():
         if args.local_rank == 0 and args.decoder_only:
             _opis = {}
             for g in opt_g.param_groups:
-                _opis[f"nowa część ({nowa_czesc.rstrip('.')})" if g.get('glowica_dekodera') else "reszta dekodera"] = g['initial_lr']
+                _opis[f"nowa część ({nazwa_nowej})" if g.get('glowica_dekodera') else "reszta dekodera"] = g['initial_lr']
             logger.info("Tempo docelowe: " + ", ".join(f"{k} {v:g}" for k, v in _opis.items())
                         + (f"; reszta dekodera stoi przez pierwsze {args.head_warmup} kroków" if args.head_warmup else ""))
     if lr_schedule == 'plateau':
@@ -1011,14 +1043,14 @@ def main():
                 zamrozone = step < args.head_warmup
                 if zamrozone != cialo_zamrozone[0]:
                     for n, p in _mod(decoder).named_parameters():
-                        if not n.startswith(nowa_czesc): p.requires_grad_(not zamrozone)
+                        if not czy_nowa(n): p.requires_grad_(not zamrozone)
                     cialo_zamrozone[0] = zamrozone
                     if args.local_rank == 0:
-                        logger.info(f"Krok {step}: " + (f"reszta dekodera zamrożona, uczy się sama nowa część ({nowa_czesc.rstrip('.')})" if zamrozone else
+                        logger.info(f"Krok {step}: " + (f"reszta dekodera zamrożona, uczy się sama nowa część ({nazwa_nowej})" if zamrozone else
                                                         f"cały dekoder w treningu (tempo reszty rośnie przez {args.body_ramp} kroków)"))
                 if zamrozone:   # statystyki BatchNorm zamrożonej części też stoją (set_train_modes włącza tryb train)
                     for n, m in _mod(decoder).named_modules():
-                        if isinstance(m, nn.modules.batchnorm._BatchNorm) and not n.startswith(nowa_czesc): m.eval()
+                        if isinstance(m, nn.modules.batchnorm._BatchNorm) and not czy_nowa(n): m.eval()
                 if not zamrozone and step < args.head_warmup + args.body_ramp:
                     for g in opt_g.param_groups:
                         if g.get('cialo_dekodera'):
