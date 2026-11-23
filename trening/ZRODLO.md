@@ -65,3 +65,4 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **Predyktor długości**: dotrenowanie z istniejących wag (`--init`, `--start_step`).
 - **Walidacja modelu tekst→latenty**: `--val_data` przyjmuje kilka plików (osobne metryki `val_<nazwa>/…`).
 - **`ocen_kodek_val.py`**: ocena kodeka na całych klipach walidacyjnych (recon, log-mel, LSD w pasmach), osobno dla każdego CSV.
+- **Kodek, dotrenowanie dekodera**: `--decoder_only` (enkoder zamrożony), `--init_ae`, `--init_disc`, `--hiband_hz`, `--hiband_floor`.

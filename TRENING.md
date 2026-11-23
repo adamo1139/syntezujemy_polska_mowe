@@ -209,7 +209,9 @@ skopiuj wybrany do pustego katalogu i podaj go jako `--out` (albo przenieś nows
 - **Długość treningu i progi:** plan 100 tys. kroków (2026-11-21), potem 500 tys.; SPFM wyłączony
   (`ttl.train.spfm_enabled`, 2026-11-22: tylko ok. 0,06% brudnych klipów); RSF wyłączony (`ttl.rsf.enabled`, 2026-11-23):
   włączony od kroku 150 000 podniósł `val/loss` w kroku 155 000 do poziomu z ok. 70 000, trening cofnięty do
-  punktu 150 000 (ostatni bez RSF). Wcześniej plan: od 50 000, potem od 150 000; oryginał 200 000.
+  punktu 150 000 (ostatni bez RSF). Odsłuch próbek z 155 000: więcej trzasków niż w 150 000.
+  Najmocniej wzrosła strata przy t = 0,1 (ponad poziom z kroku 30 000), wyraźnie też przy t = 0,9: przy prawie
+  czystym szumie odpychanie od negatywów wypycha model z „średniej” mowy. Wcześniej plan: od 50 000, potem od 150 000; oryginał 200 000.
 - **Weights & Biases:** `--wandb PROJEKT` (raz na rigu `wandb login`). Co `--log_every` kroków (10) średnie: strata,
   tempo uczenia, kroki/s, klipy i sekundy audio na sekundę (wszystkie karty), klipy na partię, dopełnienie,
   MFU i TFLOPS na kartę, szczyt pamięci; co epokę SPFM; co 5000 kroków próbki odsłuchowe. Sesja jest zapisana

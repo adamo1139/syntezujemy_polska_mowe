@@ -119,6 +119,8 @@ class ExtraTerms:
     tail_w: float = 0.0
     tail_norm: tuple = None      # (mean, std) [1, 144, 1] of the compressed latents
     hiband_w: float = 0.0
+    hiband_bin: int = 558        # pierwszy prążek STFT 2048 liczony do straty pasma wysokiego
+    hiband_floor: float = 1e-5   # podłoga amplitudy przed logarytmem
     floor_w: float = 0.0
     floor_db: float = -60.0
 
@@ -135,12 +137,14 @@ def tail_consistency_loss(encoder, mel_transform, audio, z, lengths, tail_norm):
     b = ((compress_latents(z_ref, 6) - mean) / std)[rows, :, last]
     return ((a - b).norm(dim=1) / b.norm(dim=1).clamp_min(1e-3)).mean()
 
-def hiband_loss(y_hat, audio, n_fft=2048, min_bin=558):
-    """L1 of the log-magnitude STFT above 12 kHz (bin 558 of 2048 at 44.1 kHz)."""
+def hiband_loss(y_hat, audio, n_fft=2048, min_bin=558, floor=1e-5):
+    """L1 of the log-magnitude STFT from bin `min_bin` up (558 of 2048: ok. 12 kHz przy 44,1 kHz, 13 kHz przy 48 kHz).
+    `floor`: amplituda, poniżej której różnice się nie liczą (niższa = kara także za cichy szum tam, gdzie oryginał
+    prawie nic nie ma)."""
     win = torch.hann_window(n_fft, device=audio.device)
     def logmag(x):
         S = torch.stft(x.squeeze(1), n_fft=n_fft, hop_length=HOP, window=win, return_complex=True).abs()
-        return torch.log(S[:, min_bin:, :].clamp_min(1e-5))
+        return torch.log(S[:, min_bin:, :].clamp_min(floor))
     return F.l1_loss(logmag(y_hat), logmag(audio))
 
 def silence_floor_loss(y_hat, audio, floor_db, mask=None, frame=1024):
@@ -155,7 +159,7 @@ def extra_losses(terms, encoder, mel_transform, audio, y_hat, z, lengths, mask):
     """{name: (weight, loss)} for the enabled ExtraTerms."""
     out = {}
     if terms.tail_w > 0: out["tail"] = (terms.tail_w, tail_consistency_loss(encoder, mel_transform, audio, z, lengths, terms.tail_norm))
-    if terms.hiband_w > 0: out["hiband"] = (terms.hiband_w, hiband_loss(y_hat, audio))
+    if terms.hiband_w > 0: out["hiband"] = (terms.hiband_w, hiband_loss(y_hat, audio, min_bin=terms.hiband_bin, floor=terms.hiband_floor))
     if terms.floor_w > 0: out["floor"] = (terms.floor_w, silence_floor_loss(y_hat, audio, terms.floor_db, mask))
     return out
 
@@ -533,6 +537,12 @@ def main():
     parser.add_argument('--decoder', type=str, default=None, help='Frozen decoder for --encoder_only: an AE .pt checkpoint, or "official"')
     parser.add_argument('--official_onnx', type=str, default=None, help='Local official vocoder.onnx (default: downloaded)')
     parser.add_argument('--init_encoder', type=str, default=None, help='Encoder init: AE .pt checkpoint or BlueCodec .safetensors (fresh optimizer, step 0)')
+    # --- Dotrenowanie samego dekodera (enkoder zamrożony: latenty, statystyki i model tekst->latenty bez zmian) ---
+    parser.add_argument('--decoder_only', action='store_true',
+                        help='Zamrożony enkoder, uczą się dekoder i dyskryminatory; start z --init_ae (albo --resume)')
+    parser.add_argument('--init_ae', type=str, default=None, help='Kodek startowy (.pt z "encoder" i "decoder", np. ae_wsm_210_220.pt)')
+    parser.add_argument('--init_disc', type=str, default=None,
+                        help='Dyskryminatory startowe z punktu kontrolnego treningu (.pt z "mpd" i "mrd", np. ae_220000.pt); bez tego od zera')
     parser.add_argument('--d_warmup', type=int, default=0, help='Discriminators frozen, reconstruction-only loss for the first N steps')
     parser.add_argument('--stage2', action='store_true', help='Resume an --encoder_only checkpoint (--resume) with the decoder trainable')
     # --- Paper losses (defaults reproduce the 1.5M-step recipe) ---
@@ -547,6 +557,9 @@ def main():
     parser.add_argument('--tail_stats', type=str, default=None, help='Latent stats file (mean/std over 144 compressed channels) normalising the tail term')
     parser.add_argument('--no_bn_freeze', action='store_true', help='Keep the encoder BatchNorm in train mode with --tail_consistency')
     parser.add_argument('--hiband_w', type=float, default=0.0, help='Weight of the 12-22 kHz log-magnitude STFT L1')
+    parser.add_argument('--hiband_hz', type=float, default=None,
+                        help='Dolna granica pasma straty --hiband_w w Hz (domyślnie prążek 558 z 2048, jak w oryginale)')
+    parser.add_argument('--hiband_floor', type=float, default=1e-5, help='Podłoga amplitudy w stracie --hiband_w (np. 1e-7)')
     parser.add_argument('--floor_w', type=float, default=0.0, help='Weight of the silence-floor term (source frames below --floor_db must decode below it)')
     parser.add_argument('--floor_db', type=float, default=-60.0, help='Silence floor in dBFS for --floor_w')
     parser.add_argument('--drop_list', type=str, default=None, help='Text file of audio paths (one per line) to leave out')
@@ -557,6 +570,13 @@ def main():
     parser.add_argument('--lr_warmup', type=int, default=0, help='With --continue_cosine: linear warm-up steps from 1%% of --lr')
     args = parser.parse_args()
     if args.stage2 and args.encoder_only: raise SystemExit("--stage2 trains the decoder: drop --encoder_only")
+    if args.decoder_only and (args.encoder_only or args.stage2 or args.init_encoder):
+        raise SystemExit("--decoder_only wyklucza --encoder_only, --stage2 i --init_encoder")
+    if args.decoder_only and not (args.init_ae or args.resume):
+        raise SystemExit("--decoder_only potrzebuje --init_ae (kodek startowy) albo --resume")
+    if (args.init_ae or args.init_disc) and args.resume:
+        raise SystemExit("--init_ae/--init_disc tylko przy starcie; przy --resume wszystko jest w punkcie kontrolnym")
+    if args.tail_consistency > 0 and args.decoder_only: raise SystemExit("--tail_consistency uczy enkoder: nie z --decoder_only")
     if args.stage2 and not args.resume: raise SystemExit("--stage2 needs --resume (a stage-1 checkpoint)")
     if args.encoder_only and not args.decoder:
         raise SystemExit("--encoder_only needs --decoder (an AE .pt checkpoint or 'official')")
@@ -629,7 +649,10 @@ def main():
 
     if enc_ln_init:   # a fresh encoder starts in the official latent range (LayerNorm affine = latent std / mean)
         with torch.no_grad(): encoder.norm.norm.weight.copy_(latent_std.reshape(-1)); encoder.norm.norm.bias.copy_(latent_mean.reshape(-1))
-    if train_cfg.get('sync_bn', False) and dist.get_world_size() > 1:
+    if args.decoder_only:
+        # zamrożony, więc bez DDP; tryb eval: statystyki BatchNorm też się nie ruszają
+        encoder.requires_grad_(False); encoder.eval()
+    if train_cfg.get('sync_bn', False) and dist.get_world_size() > 1 and not args.decoder_only:
         # per-GPU statistics over a small batch can collapse the encoder stem
         encoder = nn.SyncBatchNorm.convert_sync_batchnorm(encoder)
     if args.avg_every > 0:
@@ -637,7 +660,7 @@ def main():
         mpd = MultiPeriodDiscriminator().to(device)
         mrd = MultiResolutionDiscriminator().to(device)
     else:
-        encoder = DDP(encoder, device_ids=ddp_ids)
+        if not args.decoder_only: encoder = DDP(encoder, device_ids=ddp_ids)
         if not args.encoder_only: decoder = DDP(decoder, device_ids=ddp_ids)
         mpd = DDP(MultiPeriodDiscriminator().to(device), device_ids=ddp_ids)
         mrd = DDP(MultiResolutionDiscriminator().to(device), device_ids=ddp_ids)
@@ -650,7 +673,8 @@ def main():
     betas = tuple(train_cfg.get('betas', (0.8, 0.99)))
     wd = float(train_cfg.get('weight_decay', 0.01))
     enc_named = list(_mod(encoder).named_parameters())
-    if args.encoder_only or args.stage2: g_groups = param_groups(enc_named, lr, no_decay_norms)
+    if args.decoder_only: g_groups = param_groups(list(_mod(decoder).named_parameters()), lr, no_decay_norms)
+    elif args.encoder_only or args.stage2: g_groups = param_groups(enc_named, lr, no_decay_norms)
     else: g_groups = param_groups(enc_named + list(_mod(decoder).named_parameters()), lr, no_decay_norms)
     # stage 2: decoder groups after the encoder's, so a stage-1 optimizer state still loads
     dec_groups = param_groups(_mod(decoder).named_parameters(), lr * dec_lr_scale, no_decay_norms) if args.stage2 else []
@@ -666,6 +690,21 @@ def main():
         schedulers, lr_sched = cosine_schedulers(opt_g, opt_d, args.total_steps)
     
     step, epoch = load_checkpoint(args, ckpt, encoder, decoder, mpd, mrd, opt_g, opt_d, schedulers, dec_groups, logger)
+    if args.init_ae:
+        _ae = torch.load(args.init_ae, map_location=device)
+        _mod(encoder).load_state_dict({k.replace('module.', ''): v for k, v in _ae['encoder'].items()}, strict=True)
+        _mod(decoder).load_state_dict({k.replace('module.', ''): v for k, v in _ae['decoder'].items()}, strict=True)
+        if args.local_rank == 0:
+            from training.utils import encoder_fingerprint
+            logger.info(f"Kodek startowy {args.init_ae}: enkoder {encoder_fingerprint(_mod(encoder).state_dict())[:12]}"
+                        + (" (zamrożony)" if args.decoder_only else ""))
+        del _ae
+    if args.init_disc:
+        _d = torch.load(args.init_disc, map_location=device)
+        for _m, _k in ((mpd, 'mpd'), (mrd, 'mrd')):
+            _mod(_m).load_state_dict({k.replace('module.', ''): v for k, v in _d[_k].items()}, strict=True)
+        if args.local_rank == 0: logger.info(f"Dyskryminatory z {args.init_disc} (krok {_d.get('step')})")
+        del _d
     if args.init_encoder and not args.resume:
         load_init_encoder(args.init_encoder, encoder, device)
         if args.local_rank == 0: logger.info(f"Encoder initialised from {args.init_encoder}")
@@ -703,7 +742,12 @@ def main():
         }
         logger.info(f"Ocena na odłożonych klipach co {args.heldout_every} kroków: {len(heldout['clips'])} klipów, "
                     f"{sum(c.shape[-1] for c in heldout['clips']) / data_cfg['sample_rate'] / 60:.1f} min")
-    terms = ExtraTerms(tail_w=args.tail_consistency, hiband_w=args.hiband_w, floor_w=args.floor_w, floor_db=args.floor_db)
+    terms = ExtraTerms(tail_w=args.tail_consistency, hiband_w=args.hiband_w, floor_w=args.floor_w, floor_db=args.floor_db,
+                       hiband_bin=round(args.hiband_hz * 2048 / data_cfg['sample_rate']) if args.hiband_hz else 558,
+                       hiband_floor=args.hiband_floor)
+    if args.local_rank == 0 and args.hiband_w > 0:
+        logger.info(f"Strata pasma wysokiego: waga {args.hiband_w}, od {terms.hiband_bin * data_cfg['sample_rate'] / 2048:.0f} Hz, "
+                    f"podłoga {args.hiband_floor:g}")
     if args.tail_consistency > 0:
         stats = torch.load(args.tail_stats, map_location='cpu')
         terms.tail_norm = (stats['mean'].view(1, -1, 1).to(device), stats['std'].view(1, -1, 1).to(device))
@@ -711,7 +755,7 @@ def main():
     # generator EMA, used by the held-out check and eval renders; a frozen decoder is its own EMA
     enc_ema, dec_ema = encoder, decoder
     if ema_decay > 0:
-        enc_ema = copy.deepcopy(_mod(encoder)).eval().requires_grad_(False)
+        enc_ema = encoder if args.decoder_only else copy.deepcopy(_mod(encoder)).eval().requires_grad_(False)
         if not args.encoder_only: dec_ema = copy.deepcopy(_mod(decoder)).eval().requires_grad_(False)
         if step > 0:
             if 'encoder_ema' in ckpt: enc_ema.load_state_dict(ckpt['encoder_ema'])
@@ -719,10 +763,12 @@ def main():
     # must never move: the frozen decoder (stage 1) or the decoder's BatchNorm statistics (stage 2)
     def frozen_state():
         if args.encoder_only: return decoder.state_dict()
+        if args.decoder_only: return _mod(encoder).state_dict()
         return {f"{i}.{k}": v for i, m in enumerate(dec_bns) for k, v in m.named_buffers()}
     frozen_ref = {k: v.detach().cpu().clone() for k, v in frozen_state().items()}
 
     def set_train_modes():
+        if args.decoder_only: encoder.eval(); decoder.train(); return
         encoder.train()
         if freeze_bn: freeze_batchnorm(encoder)
         if args.encoder_only: decoder.eval(); return
@@ -731,8 +777,8 @@ def main():
     set_train_modes()
 
     def save(step):
-        assert all(torch.equal(v.detach().cpu(), frozen_ref[k]) for k, v in frozen_state().items()), "frozen decoder state changed"
-        extra = {"ae_config": ae_cfg, "stage": 1 if args.encoder_only else 2 if args.stage2 else 0}
+        assert all(torch.equal(v.detach().cpu(), frozen_ref[k]) for k, v in frozen_state().items()), "frozen state changed"
+        extra = {"ae_config": ae_cfg, "stage": 1 if args.encoder_only else 2 if args.stage2 else "dekoder" if args.decoder_only else 0}
         if args.stage2: extra["dec_trainable_from"] = dec_from
         if ema_decay > 0:
             extra["encoder_ema"] = enc_ema.state_dict()
@@ -746,7 +792,7 @@ def main():
     if args.local_rank == 0: logger.info(f"Pasek postępu: G/D/Mel to średnia z ostatnich {meter_window} kroków (2 epoki)")
     last_saved = None
     
-    avg_modules = [encoder, mpd, mrd] + ([] if args.encoder_only else [decoder])
+    avg_modules = ([] if args.decoder_only else [encoder]) + [mpd, mrd] + ([] if args.encoder_only else [decoder])
     if args.avg_every > 0:
         if args.encoder_only or args.stage2 or ema_decay > 0 or lr_schedule == 'plateau':
             raise SystemExit("--avg_every działa tylko z podstawowym przepisem (bez --encoder_only, --stage2, EMA i harmonogramu plateau)")
