@@ -1091,6 +1091,7 @@ def main():
                         writer.add_scalar("Loss/Heldout_UTMOS_oryginal", heldout["utmos_oryginal"], step)
                         _ut = f", UTMOS {_u:.3f} (oryginały {heldout['utmos_oryginal']:.3f})"
                     logger.info(f"step {step}: odłożone klipy — recon {_rec:.4f}, log-mel całe pasmo {_full:.4f}, prążki {_lin:.4f}{_ut} ({time.time() - _t:.1f} s)")
+                    if device.type == "cuda": torch.cuda.empty_cache()   # bufory oceny (długie klipy, UTMOS) nie zostają na trening
             if prof:
                 prof.mark("reszta pętli (harmonogram, uśrednianie, log, zapis)")
                 if prof.n == args.profile:
