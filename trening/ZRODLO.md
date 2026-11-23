@@ -68,3 +68,4 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **Kodek, dotrenowanie dekodera**: `--decoder_only` (enkoder zamrożony), `--init_ae`, `--init_disc`, `--hiband_hz`, `--hiband_floor`.
 - **Kodek, głowica w stylu Vocos**: `ISTFTHead` (widmo ramki 2048 + overlap-add, `ae.decoder.head.type = "istft"`), `--decoder_head`, `--head_warmup`; `--lr_warmup` także ze stałym tempem; skrypty budują dekoder według `ae_config` z punktu kontrolnego.
 - **Kodek, moduł poprawki**: `STFTPostnet` na wyjściu dekodera (maska widma od tożsamości, `ae.decoder.postnet`), `--decoder_postnet`; prawdziwe zamrażanie reszty dekodera przy `--head_warmup` z rampą `--body_ramp`; na jednej karcie bez DDP.
+- **Kodek, strata prążków**: `--linie_w` (nadmiar prążków co 93,75 Hz ponad oryginał, k ≤ 40) i miara `Loss/Heldout_Linie`.

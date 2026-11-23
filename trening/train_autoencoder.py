@@ -121,6 +121,7 @@ class ExtraTerms:
     hiband_w: float = 0.0
     hiband_bin: int = 558        # pierwszy prążek STFT 2048 liczony do straty pasma wysokiego
     hiband_floor: float = 1e-5   # podłoga amplitudy przed logarytmem
+    linie_w: float = 0.0         # strata prążków co sr/HOP (ślad sklejania klatek dekodera)
     floor_w: float = 0.0
     floor_db: float = -60.0
 
@@ -147,6 +148,42 @@ def hiband_loss(y_hat, audio, n_fft=2048, min_bin=558, floor=1e-5):
         return torch.log(S[:, min_bin:, :].clamp_min(floor))
     return F.l1_loss(logmag(y_hat), logmag(audio))
 
+_LINIE_IDX = {}
+
+def linie_loss(y_hat, audio, sr=48000, hop=HOP, kmax=40, szer=2, tlo=100):
+    """Prążki na wielokrotnościach sr/hop (93,75 Hz przy 48 kHz i hop 512): ślad sklejania kawałków dekodera.
+    Widmo całego fragmentu (pochodna sygnału, okno Hanna); dla każdego k wysokość prążka = maks. amplitudy w ±szer
+    prążkach wokół k·sr/hop, podzielona przez średnią w ±tlo prążkach (lokalne tło). Strata: średni NADMIAR
+    logarytmu tej wysokości ponad prawdziwe nagranie (k ≤ 40, do 3,75 kHz) — prawdziwe harmoniczne głosu w tych
+    miejscach są w celu, więc nie są karane. Na 4 klipach VoxCPM2 (fragmenty 1,4 s): rekonstrukcja starym dekoderem
+    0,290, z modułem poprawki 0,253; synteza 0,414 / 0,352 (wersja L1 do k = 200 ich nie odróżniała)."""
+    x, r = y_hat.squeeze(1).float(), audio.squeeze(1).float()
+    n = x.shape[-1] - 1
+    if n not in _LINIE_IDX:
+        df = sr / n
+        k = torch.arange(1, kmax + 1)
+        c = torch.round(k * sr / hop / df).long()
+        c = c[c + tlo < n // 2]
+        _LINIE_IDX[n] = (c[:, None] + torch.arange(-szer, szer + 1)[None], c[:, None] + torch.arange(-tlo, tlo + 1)[None])
+    szczyt_i, tlo_i = (t.to(x.device) for t in _LINIE_IDX[n])
+    okno = torch.hann_window(n, device=x.device)
+    def wysokosc(s):
+        A = torch.fft.rfft(torch.diff(s, dim=-1) * okno).abs()
+        return torch.log(A[:, szczyt_i].amax(-1).clamp_min(1e-8)) - torch.log(A[:, tlo_i].mean(-1).clamp_min(1e-8))
+    return (wysokosc(x) - wysokosc(r)).clamp_min(0).mean()
+
+@torch.no_grad()
+def heldout_linie(encoder, decoder, mel_transform, clips, device):
+    """Średnia linie_loss na odłożonych klipach (całe klipy): nadmiar prążków co 93,75 Hz ponad oryginał."""
+    encoder.eval(); decoder.eval()
+    w = []
+    for wav in clips:
+        wav = wav.to(device).unsqueeze(0)
+        y = decoder(encoder(mel_transform(wav))).reshape(1, -1)
+        n = min(y.shape[-1], wav.shape[-1])
+        w.append(linie_loss(y[None, :, :n], wav[None, :, :n]).item())
+    return sum(w) / len(w)
+
 def silence_floor_loss(y_hat, audio, floor_db, mask=None, frame=1024):
     """On frames whose source is below `floor_db` dBFS, the decoded level above `floor_db`, in units of 20 dB."""
     n = audio.shape[-1] // frame
@@ -160,6 +197,7 @@ def extra_losses(terms, encoder, mel_transform, audio, y_hat, z, lengths, mask):
     out = {}
     if terms.tail_w > 0: out["tail"] = (terms.tail_w, tail_consistency_loss(encoder, mel_transform, audio, z, lengths, terms.tail_norm))
     if terms.hiband_w > 0: out["hiband"] = (terms.hiband_w, hiband_loss(y_hat, audio, min_bin=terms.hiband_bin, floor=terms.hiband_floor))
+    if terms.linie_w > 0: out["linie"] = (terms.linie_w, linie_loss(y_hat, audio))
     if terms.floor_w > 0: out["floor"] = (terms.floor_w, silence_floor_loss(y_hat, audio, terms.floor_db, mask))
     return out
 
@@ -574,6 +612,8 @@ def main():
     parser.add_argument('--hiband_w', type=float, default=0.0, help='Weight of the 12-22 kHz log-magnitude STFT L1')
     parser.add_argument('--hiband_hz', type=float, default=None,
                         help='Dolna granica pasma straty --hiband_w w Hz (domyślnie prążek 558 z 2048, jak w oryginale)')
+    parser.add_argument('--linie_w', type=float, default=0.0,
+                        help='Waga straty prążków co 93,75 Hz (wysokość ponad tło względem prawdziwego nagrania)')
     parser.add_argument('--hiband_floor', type=float, default=1e-5, help='Podłoga amplitudy w stracie --hiband_w (np. 1e-7)')
     parser.add_argument('--floor_w', type=float, default=0.0, help='Weight of the silence-floor term (source frames below --floor_db must decode below it)')
     parser.add_argument('--floor_db', type=float, default=-60.0, help='Silence floor in dBFS for --floor_w')
@@ -803,7 +843,7 @@ def main():
                     f"{sum(c.shape[-1] for c in heldout['clips']) / data_cfg['sample_rate'] / 60:.1f} min")
     terms = ExtraTerms(tail_w=args.tail_consistency, hiband_w=args.hiband_w, floor_w=args.floor_w, floor_db=args.floor_db,
                        hiband_bin=round(args.hiband_hz * 2048 / data_cfg['sample_rate']) if args.hiband_hz else 558,
-                       hiband_floor=args.hiband_floor)
+                       hiband_floor=args.hiband_floor, linie_w=args.linie_w)
     if args.local_rank == 0 and args.hiband_w > 0:
         logger.info(f"Strata pasma wysokiego: waga {args.hiband_w}, od {terms.hiband_bin * data_cfg['sample_rate'] / 2048:.0f} Hz, "
                     f"podłoga {args.hiband_floor:g}")
@@ -935,7 +975,10 @@ def main():
                     set_train_modes()   # heldout_recon() leaves the models in eval mode
                     writer.add_scalar("Loss/Heldout_Recon", _rec, step)
                     writer.add_scalar("Loss/Heldout_LogMel_Full", _full, step)
-                    logger.info(f"step {step}: odłożone klipy — recon {_rec:.4f}, log-mel całe pasmo {_full:.4f} ({time.time() - _t:.1f} s)")
+                    _lin = heldout_linie(_mod(enc_ema), _mod(dec_ema), mel_transform_input, heldout["clips"], device)
+                    set_train_modes()
+                    writer.add_scalar("Loss/Heldout_Linie", _lin, step)
+                    logger.info(f"step {step}: odłożone klipy — recon {_rec:.4f}, log-mel całe pasmo {_full:.4f}, prążki {_lin:.4f} ({time.time() - _t:.1f} s)")
             if prof:
                 prof.mark("reszta pętli (harmonogram, uśrednianie, log, zapis)")
                 if prof.n == args.profile:

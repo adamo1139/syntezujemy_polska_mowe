@@ -377,3 +377,9 @@ wyjściu mała sieć (4 bloki ConvNeXt, 5,3M) przewiduje zespoloną maskę widma
 ciała dekodera; ostatnia warstwa od zer, więc start = jakość `ae_wsm_210_220.pt`. Przez `--head_warmup` kroków uczy
 się tylko moduł (reszta dekodera z BatchNorm zamrożona), tempo modułu `--lr × --head_lr_scale`, dyskryminatory od
 początku.
+Wynik (WSM 6–9 tys. kroków, `kodek_48k_postnet/ae_wsm_6_9.pt`): LogMel_Full 0,577 → 0,374, LSD 16–24 kHz 24,8 → 12,0,
+dolne pasmo bez zmian; prążki co 93,75 Hz tylko trochę niżej (rekonstrukcja 3,55 → 2,97, oryginał 1,72).
+
+**Głowica Vocos, podejście 2:** 15 000 kroków samej głowicy bez dyskryminatorów (tempo głowicy 5e-4, rozgrzewka
+tempa 2000), potem GAN i odmrożona reszta dekodera (rampa 1000); rekonstrukcja na log-melu w pełnym paśmie;
+strata nadmiaru prążków `--linie_w 5`; razem 30 000 kroków.
