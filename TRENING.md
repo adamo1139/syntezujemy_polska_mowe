@@ -383,3 +383,7 @@ dolne pasmo bez zmian; prążki co 93,75 Hz tylko trochę niżej (rekonstrukcja 
 **Głowica Vocos, podejście 2:** 15 000 kroków samej głowicy bez dyskryminatorów (tempo głowicy 5e-4, rozgrzewka
 tempa 2000), potem GAN i odmrożona reszta dekodera (rampa 1000); rekonstrukcja na log-melu w pełnym paśmie;
 strata nadmiaru prążków `--linie_w 5`; razem 30 000 kroków.
+Po 6000 krokach samej głowicy (WSM 4–6 tys.): prążki 1,46 w rekonstrukcji i 1,32 w syntezie, poniżej oryginału
+(1,72), ale za dużo energii powyżej 8 kHz (bez dyskryminatorów). Błąd: głowica wpisała głośny ton w prążek
+Nyquista (24 kHz), którego żadna strata nie pilnuje — poprawka w `ISTFTHead`: prążki 0 Hz i 24 kHz zawsze zero.
+Dalej: wznowienie od kroku 6000 od razu z dyskryminatorami i odmrożoną resztą dekodera.

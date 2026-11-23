@@ -82,6 +82,9 @@ class ISTFTHead(nn.Module):
         B, _, T = h.shape
         nb = self.n_fft // 2 + 1
         mag = torch.exp(h[:, :nb].float().clamp(max=6.0))
+        # prążek stały (0 Hz) i Nyquista (sr/2) zawsze zero: żadna strata ich nie pilnuje (filtry melowe na samej
+        # górze są puste), a bez dyskryminatorów głowica potrafi tam wpisać głośny ton 24 kHz
+        mag = torch.cat([torch.zeros_like(mag[:, :1]), mag[:, 1:-1], torch.zeros_like(mag[:, -1:])], dim=1)
         faza = h[:, nb:].float()
         widmo = torch.complex(mag * torch.cos(faza), mag * torch.sin(faza))
         ramki = torch.fft.irfft(widmo, n=self.n_fft, dim=1) * self.window[None, :, None]   # [B, n_fft, T]
