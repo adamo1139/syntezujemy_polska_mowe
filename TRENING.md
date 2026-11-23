@@ -351,6 +351,28 @@ python skrypty/generuj.py --pomin 0 --teksty teksty/val_liczby_slownie.jsonl --w
 python skrypty/przygotuj_audio.py --zastap wyniki/poziomka_val_liczby_slownie
 ```
 
+Surowy zbiór (przed filtrem) idzie na HF z kolumnami `text` (słownie, tak jak dostał go model) i `text_cyfry`:
+
+```bash
+python skrypty/wyslij_na_hf.py --repo RockTheBoat/VoxCPM2-pol-one-voice-liczby-slownie \
+  --wyniki wyniki/poziomka_liczby_slownie --publiczne
+```
+
+Czyszczenie przez ASR (`skrypty/czysc_asr.py`, Parakeet Ultra przez Photon; osobne środowisko z
+`pip install moondream sentence-transformers morfeusz2 rapidfuzz`). Transkrypcja przechodzi przez ten sam
+normalizator co tekst, potem idzie porównanie: CER/WER, podobieństwo embeddingów (multilingual-e5-large), ucięty
+koniec, dopiski, zapętlenia, tempo. Wynik trafia do `<synteza>/asr/` (`raport.txt`, `usun.txt`, `odsluch.txt`,
+`probki/`).
+
+```bash
+K=(1 2 3 5 6 7); for i in "${!K[@]}"; do
+  CUDA_VISIBLE_DEVICES=${K[$i]} python skrypty/czysc_asr.py asr wyniki/poziomka_liczby_slownie \
+    --czesc $i/${#K[@]} > asr_$i.log 2>&1 &
+done; wait
+python skrypty/czysc_asr.py ocen wyniki/poziomka_liczby_slownie --probki 40
+python skrypty/przygotuj_audio.py --zastap wyniki/poziomka_liczby_slownie --usun wyniki/poziomka_liczby_slownie/asr/usun.txt
+```
+
 Potem latenty od nowa (polecenie z sekcji 6) i dotrenowanie predyktora długości i modelu tekst→latenty.
 
 ## 7. Brzmienie syntezy: odsłuchy i wybrany łańcuch (2026-11-23)

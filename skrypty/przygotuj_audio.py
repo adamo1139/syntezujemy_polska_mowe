@@ -35,11 +35,13 @@ Przykłady:
   python skrypty/przygotuj_audio.py --dodaj wyniki/poziomka_liczby
   python skrypty/przygotuj_audio.py --dodaj-val liczby=wyniki/poziomka_val_liczby
   python skrypty/przygotuj_audio.py --zastap wyniki/poziomka_liczby_slownie
+  python skrypty/przygotuj_audio.py --usun wyniki/poziomka_liczby_slownie/asr/usun.txt   (id z czysc_asr.py)
 """
 
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import hashlib
 import json
@@ -96,6 +98,9 @@ def z_parquet(katalog: Path, cel: Path) -> list[dict]:
             for wpis in paczka.to_pylist():
                 audio = wpis.pop("audio")
                 wpis["tekst"] = wpis.pop("text")
+                if wpis.get("text_cyfry"):  # zbiór „liczby słownie”: trening na zapisie z cyframi
+                    wpis["tekst_slowny"] = wpis["tekst"]
+                    wpis["tekst"] = wpis.pop("text_cyfry")
                 sciezka = cel / f"{wpis['id']}.flac"
                 if not sciezka.exists() or sciezka.stat().st_size != len(audio["bytes"]):
                     tymczasowa = sciezka.with_suffix(".flac.tmp")
@@ -120,6 +125,8 @@ def main() -> None:
     p.add_argument("--dodaj", action="append", default=[], help="katalog dodatkowej syntezy (manifest.jsonl + audio/), tylko do treningu")
     p.add_argument("--zastap", action="append", default=[],
                    help="katalog ponownej syntezy: klipy o tych samych id dostają nowe audio (podział bez zmian)")
+    p.add_argument("--usun", action="append", default=[],
+                   help="plik z id klipów do usunięcia z danych (po jednym w wierszu, np. usun.txt z czysc_asr.py)")
     p.add_argument("--dodaj-val", action="append", default=[], metavar="NAZWA=KATALOG",
                    help="dodatkowy zbiór walidacyjny: klipy z KATALOG -> dane/bluetts_val_NAZWA.csv")
     args = p.parse_args()
@@ -199,6 +206,14 @@ def main() -> None:
             znane.add(w["id"])
         wiersze += nowe
         print(f"Dodane z {katalog}: {len(nowe)} klipów, {sum(w['sekundy'] for w in nowe) / 3600:.1f} h (walidacja val_{nazwa})")
+    for plik_usun in args.usun:
+        do_usuniecia = {w.strip() for w in Path(plik_usun).read_text(encoding="utf-8").splitlines() if w.strip()}
+        przed = wiersze
+        wiersze = [w for w in wiersze if w["id"] not in do_usuniecia]
+        usuniete = [w for w in przed if w["id"] in do_usuniecia]
+        print(f"Usunięte wg {plik_usun}: {len(usuniete)} klipów, {sum(w['sekundy'] for w in usuniete) / 3600:.1f} h "
+              f"(z listy {len(do_usuniecia)}; " + ", ".join(f"{p}: {c}" for p, c in
+              collections.Counter(w["podzial"] for w in usuniete).items()) + ")")
     wiersze.sort(key=lambda w: w["id"])
     podzialy = ["train", "val"] + sorted({w["podzial"] for w in wiersze} - {"train", "val"})
 

@@ -42,6 +42,13 @@ KOLUMNY = [
     ("jakosc", "jakosc", "float32", "float32"),
     ("pytanie", "pytanie", "bool", "bool"),
 ]
+# Synteza z tekstu słownego (liczby/normalizuj.py): `text` to tekst słowny podany modelowi, a `text_cyfry`
+# oryginał z cyframi (ten idzie do treningu).
+KOLUMNA_CYFRY = ("text_cyfry", "tekst_cyfry", "string", "string")
+
+
+def kolumny(wiersze: list[dict]) -> list[tuple]:
+    return KOLUMNY + [KOLUMNA_CYFRY] if any("tekst_cyfry" in w for w in wiersze) else KOLUMNY
 
 
 def wczytaj_manifest(katalog: Path) -> list[dict]:
@@ -104,7 +111,7 @@ def paczki_kompletne(paczki: Path) -> int:
     return ile if [plik.name for plik in pliki] == oczekiwane else 0
 
 
-def schemat(czestotliwosc: int):
+def schemat(czestotliwosc: int, KOLUMNY: list[tuple]):
     import pyarrow as pa
 
     typy = {"string": pa.string(), "float32": pa.float32(), "int32": pa.int32(), "bool": pa.bool_()}
@@ -115,7 +122,7 @@ def schemat(czestotliwosc: int):
     return pa.schema(pola, metadata={"huggingface": json.dumps({"info": {"features": cechy}})})
 
 
-def zapisz_plik(sciezka: Path, wpisy: list[dict], schemat_pa) -> None:
+def zapisz_plik(sciezka: Path, wpisy: list[dict], schemat_pa, KOLUMNY: list[tuple]) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -148,6 +155,14 @@ def karta(repo: str, wiersze: list[dict], czestotliwosc: int, zrodlo_tekstow: st
         czas_tematow[str(w.get("temat"))] += w["sekundy"]
     wiersze_tematow = "\n".join(f"| {temat} | {sek / 3600:.1f} |" for temat, sek in czas_tematow.most_common())
     czesci = sorted({w.get("czesc") for w in wiersze if w.get("czesc") is not None})
+    slownie = any("tekst_cyfry" in w for w in wiersze)
+    opis_liczb = (
+        "Liczby, daty, godziny, jednostki i skróty modelowi podano **słownie, z odmianą** (np. „w 2026 roku” → „w dwa "
+        "tysiące dwudziestym szóstym roku”, „20 tys. zł” → „dwadzieścia tysięcy złotych”), bo VoxCPM2 źle czyta "
+        "cyfry. Zamianę zrobił regułowy normalizator `liczby/normalizuj.py` (Morfeusz 2, bez LLM). Kolumna "
+        "`text_cyfry` ma oryginalny zapis z cyframi."
+        if slownie else "Liczby i skróty są w formie surowej (bez normalizacji).")
+    wiersz_cyfry = "\n| `text_cyfry` | ten sam tekst w oryginalnym zapisie, z cyframi i skrótami |" if slownie else ""
     return f"""---
 license: apache-2.0
 language:
@@ -180,8 +195,8 @@ co model faktycznie powiedział — część klipów może mieć pominięte lub 
 - **Głos:** {", ".join(glosy)} (tryb: {", ".join(tryby)}), jedno nagranie wzorcowe dla wszystkich klipów.
   Głos jest syntetyczny (wylosowany przez VoxCPM2), nie należy do żadnej osoby.
 - **Teksty:** {zrodlo_tekstow}: rozmowy bez udziału modelu `private`, górne 10% według
-  `jakosc.ocena`, oczyszczone z markdownu i pocięte na fragmenty z całych zdań. Liczby i skróty są w formie
-  surowej (bez normalizacji). {rozmowy} rozmów źródłowych; {pytania:.0f}% klipów to pytania użytkownika,
+  `jakosc.ocena`, oczyszczone z markdownu i pocięte na fragmenty z całych zdań. {opis_liczb}
+  {rozmowy} rozmów źródłowych; {pytania:.0f}% klipów to pytania użytkownika,
   reszta to fragmenty odpowiedzi asystenta.
 - **Kod:** https://github.com/adamo1139/syntezujemy_polska_mowe
 
@@ -190,7 +205,7 @@ co model faktycznie powiedział — część klipów może mieć pominięte lub 
 | kolumna | opis |
 |---|---|
 | `audio` | klip FLAC, {czestotliwosc} Hz, mono |
-| `text` | tekst podany modelowi |
+| `text` | tekst podany modelowi |{wiersz_cyfry}
 | `id` | identyfikator klipu |
 | `sekundy` | długość klipu |
 | `glos` | nazwa głosu wzorcowego |
@@ -306,9 +321,10 @@ def main() -> None:
         )
         if potrzeba * 1.02 > wolne:
             sys.exit(f"Za mało miejsca: potrzeba ok. {potrzeba / 1e9:.1f} GB, wolne {wolne / 1e9:.1f} GB. Podaj --paczki na innym dysku.")
-        schemat_pa = schemat(czestotliwosc)
+        kol = kolumny(wiersze)
+        schemat_pa = schemat(czestotliwosc, kol)
         for nr, (nazwa, wpisy) in enumerate(do_zapisu, 1):
-            zapisz_plik(nazwa, wpisy, schemat_pa)
+            zapisz_plik(nazwa, wpisy, schemat_pa, kol)
             if nr % 10 == 0 or nr == len(do_zapisu):
                 print(f"  zapisano {nr}/{len(do_zapisu)} plików  [{time.time() - t0:.0f} s]", flush=True)
         (paczki / "README.md").write_text(karta(args.repo, wiersze, czestotliwosc, args.zrodlo_tekstow), encoding="utf-8")
