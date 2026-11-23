@@ -4,7 +4,7 @@
 Trzy kroki (każdy wznawialny, wyniki w katalogu --praca, domyślnie <katalog syntezy>/asr):
 
   asr    transkrypcja klipów z manifest.jsonl przez Parakeet Ultra (moondream/parakeet-ultra, runtime Photon).
-         Duży zbiór dzieli się na części (--czesc K/N) i puszcza po jednym procesie na kartę.
+         --karty 1,2,3 puszcza po jednym procesie na kartę (każdy bierze swoją część zbioru, log w <praca>/).
   ocen   porównanie transkrypcji z polem „tekst” (to, co dostał VoxCPM2): obie strony przechodzą przez
          liczby/normalizuj.py (Parakeet pisze liczby cyframi) i tę samą normalizację słów. Miary:
            cer, wer            błąd znakowy/wyrazowy po normalizacji
@@ -19,10 +19,7 @@ Trzy kroki (każdy wznawialny, wyniki w katalogu --praca, domyślnie <katalog sy
 
 Przykład (karty 1,2,3,5,6,7, środowisko z `pip install moondream sentence-transformers morfeusz2 rapidfuzz`):
 
-  K=(1 2 3 5 6 7); for i in "${!K[@]}"; do
-    CUDA_VISIBLE_DEVICES=${K[$i]} python skrypty/czysc_asr.py asr wyniki/poziomka_liczby_slownie \\
-      --czesc $i/${#K[@]} > asr_$i.log 2>&1 &
-  done; wait
+  python skrypty/czysc_asr.py asr wyniki/poziomka_liczby_slownie --karty 1,2,3,5,6,7
   python skrypty/czysc_asr.py ocen wyniki/poziomka_liczby_slownie --probki 40
 """
 
@@ -67,7 +64,47 @@ def gotowe_id(sciezka: Path) -> set[str]:
 
 # ------------------------------------------------------------------------------------------------ ASR
 
+def krok_asr_na_kartach(args) -> None:
+    """Po jednym procesie potomnym na kartę, każdy z inną częścią zbioru; czeka na wszystkie."""
+    import os
+    import subprocess
+
+    karty = [k.strip() for k in args.karty.split(",") if k.strip()]
+    praca = Path(args.praca or Path(args.katalog) / "asr")
+    praca.mkdir(parents=True, exist_ok=True)
+    procesy = []
+    for i, karta in enumerate(karty):
+        polecenie = [sys.executable, __file__, "asr", args.katalog, "--praca", str(praca), "--czesc", f"{i}/{len(karty)}",
+                     "--model", args.model, "--watki", str(args.watki)]
+        if args.limit:
+            polecenie += ["--limit", str(args.limit)]
+        log = (praca / f"asr_karta{karta}.log").open("w")
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": karta}
+        procesy.append((karta, subprocess.Popen(polecenie, env=env, stdout=log, stderr=subprocess.STDOUT), log))
+        print(f"karta {karta}: część {i}/{len(karty)}, log {praca / f'asr_karta{karta}.log'}", flush=True)
+    try:
+        ostatnio = time.time()
+        while any(p.poll() is None for _, p, _ in procesy):
+            time.sleep(5)
+            if time.time() - ostatnio < 60:
+                continue
+            ostatnio = time.time()
+            zrobione = sum(sum(1 for _ in f.open(encoding="utf-8")) for f in praca.glob("asr_*_z_*.jsonl"))
+            print(f"  transkrypcji: {zrobione}", flush=True)
+    except KeyboardInterrupt:
+        for _, p, _ in procesy:
+            p.terminate()
+        raise
+    nieudane = [k for k, p, log in procesy if (log.close() or p.returncode)]
+    if nieudane:
+        sys.exit(f"Procesy na kartach {', '.join(nieudane)} skończyły się błędem — zobacz logi w {praca}. "
+                 "To samo polecenie wznowi pracę.")
+    print(f"Gotowe. Dalej: python {Path(__file__).relative_to(KATALOG_PROJEKTU)} ocen {args.katalog}")
+
+
 def krok_asr(args) -> None:
+    if args.karty:
+        return krok_asr_na_kartach(args)
     import moondream as md
 
     katalog = Path(args.katalog)
@@ -278,7 +315,8 @@ def main() -> None:
     a = sub.add_parser("asr", help="transkrypcja Parakeet Ultra")
     a.add_argument("katalog", help="katalog syntezy (manifest.jsonl + audio/)")
     a.add_argument("--praca", help="katalog na wyniki (domyślnie <katalog>/asr)")
-    a.add_argument("--czesc", default="0/1", help="K/N: ta część zbioru (podział po skrócie id)")
+    a.add_argument("--karty", help="numery kart po przecinku: po jednym procesie na kartę")
+    a.add_argument("--czesc", default="0/1", help="K/N: tylko ta część zbioru (używane wewnętrznie przez --karty)")
     a.add_argument("--model", default="moondream/parakeet-ultra")
     a.add_argument("--watki", type=int, default=32, help="równoległe żądania do Photon")
     a.add_argument("--limit", type=int, help="tylko N klipów (próba)")
