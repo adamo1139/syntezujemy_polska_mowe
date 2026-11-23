@@ -92,6 +92,36 @@ def discriminator_loss(disc_real_outputs, disc_generated_outputs):
         loss += (r_loss + g_loss)
     return loss
 
+class SLMHead(nn.Module):
+    """Dyskryminator SLM jak w StyleTTS2 (WavLMDiscriminator): na zamrożonych cechach WavLM ze wszystkich warstw
+    transformera, sklejonych w kanałach [B, L*768, T]; 1×1 do `kanaly`, dwie konwolucje 5, wyjście 1 kanał."""
+    def __init__(self, warstwy=12, wymiar=768, kanaly=64):
+        super().__init__()
+        wn = nn.utils.parametrizations.weight_norm
+        self.pre = wn(nn.Conv1d(warstwy * wymiar, kanaly, 1))
+        self.convs = nn.ModuleList([wn(nn.Conv1d(kanaly, kanaly * 2, 5, padding=2)),
+                                    wn(nn.Conv1d(kanaly * 2, kanaly * 4, 5, padding=2))])
+        self.post = wn(nn.Conv1d(kanaly * 4, 1, 3, padding=1))
+
+    def forward(self, cechy):   # cechy: lista L tensorów [B, T, 768]
+        x = F.leaky_relu(self.pre(torch.cat(cechy, dim=-1).transpose(1, 2)), 0.1)
+        for c in self.convs:
+            x = F.leaky_relu(c(x), 0.1)
+        return self.post(x)
+
+class SLM:
+    """Zamrożony WavLM-Base+ (torchaudio, MIT) i uczona głowica SLMHead; tylko w treningu (przy inferencji nic).
+    Strata generatora: przeciwstawna (LSGAN, jak MPD/MRD) i dopasowanie cech WavLM (średnie L1 po warstwach).
+    Liczone na całym segmencie (nie na krótkim wycinku dla MPD/MRD), dla pierwszych `partia` klipów porcji."""
+    def __init__(self, device, sr, w_adv, w_fm, partia, kanaly=64):
+        self.wavlm = torchaudio.pipelines.WAVLM_BASE_PLUS.get_model().to(device).eval().requires_grad_(False)
+        self.head = SLMHead(len(self.wavlm.encoder.transformer.layers), 768, kanaly).to(device)
+        self.sr, self.w_adv, self.w_fm, self.partia = sr, w_adv, w_fm, partia
+
+    def cechy(self, wav):   # wav [B, 1, N] przy self.sr -> lista warstw [B, T, 768]
+        x = torchaudio.functional.resample(wav[: self.partia].squeeze(1).float(), self.sr, 16000)
+        return self.wavlm.extract_features(x)[0]
+
 class LogMelFullBand(nn.Module):
     """Paper reconstruction mel: LOG magnitude up to sr/2 (the default loss is linear, capped at 12 kHz)."""
     def __init__(self, sample_rate, n_fft, hop_length, win_length, n_mels, eps=1e-5):
@@ -245,7 +275,7 @@ def recon_l1(real, fake, mel_transforms):
 
 def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_transforms_loss, opt_g, opt_d, device, crop_len, logger,
                update_discriminator=True, lambda_recon=45.0, recon_full_segment=False, fm_composite=False, encoder_only=False, recon_only=False,
-               terms=None, clip_generator=True, prof=None):
+               terms=None, clip_generator=True, prof=None, slm=None, opt_slm=None):
     # recon_only: no adversarial or feature-matching terms for the generator.
     # encoder_only: the frozen decoder stays in the graph, so gradients reach the encoder through it.
     lambda_adv, lambda_fm = 1.0, 0.1
@@ -291,6 +321,19 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
         torch.nn.utils.clip_grad_norm_(mrd.parameters(), 1.0)
         opt_d.step()
         loss_d_total = loss_d_total.item()
+    slm_real = slm_fake = None
+    if slm is not None:
+        with torch.no_grad():
+            slm_real = slm.cechy(audio)                 # cel: bez gradientu
+        slm_fake = slm.cechy(y_hat)                     # raz, z gradientem przez zamrożony WavLM (krok generatora);
+        if update_discriminator and slm.w_adv > 0:      # dyskryminator dostaje odłączoną kopię
+            loss_slm_d = discriminator_loss([slm.head(slm_real)], [slm.head([f.detach() for f in slm_fake])])
+            if check_for_nan_inf(loss_slm_d, "SLM Discriminator Loss", logger): return None
+            opt_slm.zero_grad()
+            loss_slm_d.backward()
+            torch.nn.utils.clip_grad_norm_(slm.head.parameters(), 1.0)
+            opt_slm.step()
+            loss_d_total = loss_d_total + loss_slm_d.item()
     if prof: prof.mark("dyskryminatory: w przód, wstecz, krok")
 
     # Reconstruction on the adversarial crop, or on the whole segment with recon_full_segment.
@@ -303,7 +346,7 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
     # jest identyczny. Pod DDP zostaje po staremu (reduktor DDP oczekuje gradientów wszystkich wag).
     freeze_d = not recon_only and not isinstance(mpd, DDP) and not isinstance(mrd, DDP)
     if freeze_d:
-        d_params = [p for m in (mpd, mrd) for p in m.parameters() if p.requires_grad]
+        d_params = [p for m in (mpd, mrd) + ((slm.head,) if slm is not None else ()) for p in m.parameters() if p.requires_grad]
         for p in d_params: p.requires_grad_(False)
     if not recon_only:
         y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(audio_crop, y_hat_crop)
@@ -315,6 +358,11 @@ def train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_trans
     else:
         loss_g_total = lambda_recon * L_recon
     extras = extra_losses(terms or ExtraTerms(), encoder, mel_transform_input, audio, y_hat, z, lengths, mask)
+    if slm is not None:
+        if slm.w_fm > 0:
+            extras["slm_fm"] = (slm.w_fm, sum(F.l1_loss(g.float(), r.float()) for g, r in zip(slm_fake, slm_real)) / len(slm_fake))
+        if slm.w_adv > 0 and not recon_only:
+            extras["slm_adv"] = (slm.w_adv, generator_loss([slm.head(slm_fake)]))
     for w, loss in extras.values(): loss_g_total = loss_g_total + w * loss
     if prof: prof.mark("generator: dyskryminatory w przód + straty")
     
@@ -625,6 +673,11 @@ def main():
     parser.add_argument('--hiband_w', type=float, default=0.0, help='Weight of the 12-22 kHz log-magnitude STFT L1')
     parser.add_argument('--hiband_hz', type=float, default=None,
                         help='Dolna granica pasma straty --hiband_w w Hz (domyślnie prążek 558 z 2048, jak w oryginale)')
+    parser.add_argument('--slm_w', type=float, default=0.0,
+                        help='Waga straty przeciwstawnej dyskryminatora SLM (zamrożony WavLM-Base+, jak w StyleTTS2); 0 = wyłączony')
+    parser.add_argument('--slm_fm_w', type=float, default=0.0,
+                        help='Waga dopasowania cech WavLM (średnie L1 po warstwach, wyjście vs cel); 0 = wyłączone')
+    parser.add_argument('--slm_partia', type=int, default=16, help='Ile klipów porcji idzie przez WavLM (pamięć)')
     parser.add_argument('--linie_w', type=float, default=0.0,
                         help='Waga straty prążków co 93,75 Hz (wysokość ponad tło względem prawdziwego nagrania)')
     parser.add_argument('--hiband_floor', type=float, default=1e-5, help='Podłoga amplitudy w stracie --hiband_w (np. 1e-7)')
@@ -779,6 +832,25 @@ def main():
         schedulers, lr_sched = cosine_schedulers(opt_g, opt_d, args.total_steps)
     
     step, epoch = load_checkpoint(args, ckpt, encoder, decoder, mpd, mrd, opt_g, opt_d, schedulers, dec_groups, logger)
+    # dyskryminator SLM (--slm_w / --slm_fm_w): własny optymalizator, stałe tempo; stan w punkcie kontrolnym pod "slm"
+    slm, opt_slm = None, None
+    if args.slm_w > 0 or args.slm_fm_w > 0:
+        if dist.get_world_size() > 1 and args.avg_every == 0:
+            raise SystemExit("--slm_w/--slm_fm_w na kilku kartach wymaga --avg_every (głowica SLM nie jest pod DDP)")
+        slm = SLM(device, data_cfg['sample_rate'], args.slm_w, args.slm_fm_w, args.slm_partia)
+        opt_slm = torch.optim.AdamW(slm.head.parameters(), lr=lr, betas=betas, weight_decay=wd)
+        _zrodlo = ckpt if ckpt is not None and 'slm' in ckpt else None
+        if _zrodlo is None and args.init_disc:
+            _d = torch.load(args.init_disc, map_location='cpu')
+            _zrodlo = _d if 'slm' in _d else None
+        if _zrodlo is not None:
+            slm.head.load_state_dict(_zrodlo['slm'])
+            if 'opt_slm' in _zrodlo: opt_slm.load_state_dict(_zrodlo['opt_slm'])
+        if args.local_rank == 0:
+            logger.info(f"SLM: WavLM-Base+ zamrożony ({sum(p.numel() for p in slm.wavlm.parameters()) / 1e6:.1f}M), głowica "
+                        f"{sum(p.numel() for p in slm.head.parameters()) / 1e6:.2f}M "
+                        f"({'z punktu kontrolnego' if _zrodlo is not None else 'od zera'}); wagi: przeciwstawna {args.slm_w:g}, "
+                        f"cechy {args.slm_fm_w:g}; {args.slm_partia} klipów porcji")
     if args.init_ae:
         _ae = torch.load(args.init_ae, map_location=device)
         _mod(encoder).load_state_dict({k.replace('module.', ''): v for k, v in _ae['encoder'].items()}, strict=True)
@@ -895,6 +967,7 @@ def main():
         if ema_decay > 0:
             extra["encoder_ema"] = enc_ema.state_dict()
             if not args.encoder_only: extra["decoder_ema"] = dec_ema.state_dict()
+        if slm is not None: extra["slm"], extra["opt_slm"] = slm.head.state_dict(), opt_slm.state_dict()
         save_checkpoint(step, epoch, encoder, decoder, mpd, mrd, opt_g, opt_d, schedulers, logger, ckpt_dir, decoder_source, extra)
 
     crop_len = int(data_cfg['sample_rate'] * 0.19)
@@ -905,6 +978,7 @@ def main():
     last_saved = None
     
     avg_modules = ([] if args.decoder_only else [encoder]) + [mpd, mrd] + ([] if args.encoder_only else [decoder])
+    if slm is not None: avg_modules.append(slm.head)
     if args.avg_every > 0:
         if args.encoder_only or args.stage2 or ema_decay > 0 or lr_schedule == 'plateau':
             raise SystemExit("--avg_every działa tylko z podstawowym przepisem (bez --encoder_only, --stage2, EMA i harmonogramu plateau)")
@@ -942,7 +1016,8 @@ def main():
             result = train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_transforms_loss, opt_g, opt_d, device, crop_len, logger,
                                 update_discriminator=(step > args.d_warmup), recon_only=(0 < args.d_warmup and step <= args.d_warmup),
                                 recon_full_segment=(recon != 'linmel_12k'),
-                                fm_composite=fm_composite, encoder_only=args.encoder_only, terms=terms, clip_generator=clip_generator, prof=prof)
+                                fm_composite=fm_composite, encoder_only=args.encoder_only, terms=terms, clip_generator=clip_generator, prof=prof,
+                                slm=slm, opt_slm=opt_slm)
             if result is None: break
             loss_g, loss_d, loss_mel, extras = result
             if lr_schedule != 'plateau':
