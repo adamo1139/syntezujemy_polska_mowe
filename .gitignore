@@ -6,3 +6,5 @@ teksty/
 dane/
 modele/
 trening/.venv/
+liczby/teksty_hf.*
+liczby/teksty_slowne.jsonl

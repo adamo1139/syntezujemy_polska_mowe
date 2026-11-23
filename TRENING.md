@@ -325,6 +325,34 @@ python usrednij_dp.py --punkty ../modele/dp/duration_predictor_wsm.pt ../modele/
 # w poleceniu treningu: --val_data ../dane/bluetts_val.csv ../dane/bluetts_val_liczby.csv
 ```
 
+### 6b. Liczby słownie dla nauczyciela (ponowna synteza, 2026-11-23)
+
+VoxCPM2 źle czyta cyfry („20 tys. zł” → „20 Tysu Dzeko”, „1,5 godziny” → „7 godziny”), a model tekst→latenty
+uczy się jego błędów. Dlatego nauczyciel dostaje tekst słowny z poprawną odmianą, a do treningu idzie dalej
+tekst z cyframi. Zamiana liczb: `liczby/normalizuj.py`, czyli reguły i Morfeusz 2 (przypadek z przyimka przed
+liczbą i z formy rzeczownika po niej), bez LLM. Na zbiorze NKJP Poświaty i Perełkiewicza (BSNLP 2019) daje 73,7%
+zdań identycznych ze wzorcem (`liczby/ocena_nkjp.py`). Część różnic to też poprawne warianty, np. „około
+siedemdziesięciu”. Na `RockTheBoat/VoxCPM2-pol-one-voice-liczby` (30 625 klipów) w wersji słownej nie zostaje żadna
+cyfra, a 652 teksty mają flagę niepewnego przypadku. Gotowe wejście jest w repo: `liczby/do_syntezy.jsonl`
+(`tekst` słowny dla VoxCPM2, `tekst_cyfry` oryginał, metadane rozmowy). `generuj.py` przepisuje wszystkie pola do
+manifestu, a `przygotuj_audio.py` bierze do treningu `tekst_cyfry`.
+
+```bash
+# z katalogu repo, środowisko syntezy; te same ustawienia co pierwotny zbiór (poziomka, CFG 2.0, 10 kroków)
+python skrypty/generuj.py --karty 4 --teksty liczby/do_syntezy.jsonl --wyjscie wyniki/poziomka_liczby_slownie \
+  --cfg 2.0 --kroki 10 --rownolegle 32
+# podmiana nagrań: te same id dostają nowe audio, podział bez zmian
+python skrypty/przygotuj_audio.py --zastap wyniki/poziomka_liczby_slownie
+
+# walidacja z liczbami tak samo (potrzebny pip install morfeusz2)
+python liczby/normalizuj.py --wejscie teksty/val_liczby.jsonl --wyjscie teksty/val_liczby_slownie.jsonl
+python skrypty/generuj.py --pomin 0 --teksty teksty/val_liczby_slownie.jsonl --wyjscie wyniki/poziomka_val_liczby_slownie \
+  --cfg 2.0 --kroki 10 --rownolegle 32
+python skrypty/przygotuj_audio.py --zastap wyniki/poziomka_val_liczby_slownie
+```
+
+Potem latenty od nowa (polecenie z sekcji 6) i dotrenowanie predyktora długości i modelu tekst→latenty.
+
 ## 7. Brzmienie syntezy: odsłuchy i wybrany łańcuch (2026-11-23)
 
 Problem: synteza modelu tekst→latenty (punkt 115k) ma „cierpkość”, której nie ma w nagraniach VoxCPM2.
@@ -414,6 +442,22 @@ Moduł poprawki to tylko mały zysk; brzmienie dalej odstaje od oryginału — d
 do tekstu — oryginał VoxCPM2 0,972, rekonstrukcja starym dekoderem 0,970, z modułem poprawki 0,970, synteza
 modelem 115k 0,979. Kodek niczego nie psuje; błędy są już w nagraniach VoxCPM2 („20 tys. zł” → „20 Tysu Dzeko”,
 „1,5 godziny” → „7 godziny”, „np. do 1 kV” → bełkot). Wyjście: zamiana liczb na słowa przed syntezą.
+
+**UTMOS łańcucha z Sidonem** (`trening/ocen_sidon.py`, 100 par walidacyjnych, kodek z modułem poprawki
+`ae_wsm_6_9.pt`; EQ = `trening/korektor_sidona_db.npy`):
+
+| | UTMOS |
+|---|---|
+| oryginał VoxCPM2 | 2,965 |
+| kodek | 2,702 |
+| kodek → Sidon | 3,148 |
+| kodek → Sidon → EQ | 3,157 |
+| oryginał → Sidon | 3,223 |
+| oryginał → Sidon → EQ | 3,240 |
+
+Sidon z EQ podnosi wyjście kodeka powyżej samego oryginału — dobry cel do destylacji w mały postfiltr
+(wyjście TTS/kodeka → Sidon + EQ, bez potrzeby par z oryginałem). Sidon v0.1 ma ok. 250M parametrów
+(w2v-BERT ok. 200M + wokoder ok. 50M, szacunek z rozmiaru plików), za dużo na CPU.
 
 ## 8. Postfiltr COSE (jednokrokowy, generatywny) — eksperyment, porzucony (2026-11-23)
 

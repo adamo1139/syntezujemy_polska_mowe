@@ -21,6 +21,10 @@ Dodatkowe syntezy (--dodaj KATALOG, można powtórzyć; katalog z manifest.jsonl
 trafiają w całości do treningu, a podział istniejących klipów z `dane/metadane.jsonl` zostaje bez zmian,
 więc walidacja jest dalej ta sama.
 
+Nowe nagrania tych samych klipów (--zastap KATALOG, np. po ponownej syntezie z tekstem słownym): wpisy o tym
+samym id dostają nowe audio i tekst, a podział zostaje; id, których jeszcze nie ma, trafiają do treningu jak
+przy --dodaj.
+
 Dodatkowe zbiory walidacyjne (--dodaj-val NAZWA=KATALOG, np. liczby=wyniki/poziomka_val_liczby): klipy dostają
 podział „val_NAZWA” i trafiają tylko do `bluetts_val_NAZWA.csv` (nie do treningu ani do list kodeka). Ich rozmowy
 nie mogą występować w żadnym innym podziale.
@@ -30,6 +34,7 @@ Przykłady:
   python skrypty/przygotuj_audio.py --repo RockTheBoat/VoxCPM2-pol-one-voice-367h
   python skrypty/przygotuj_audio.py --dodaj wyniki/poziomka_liczby
   python skrypty/przygotuj_audio.py --dodaj-val liczby=wyniki/poziomka_val_liczby
+  python skrypty/przygotuj_audio.py --zastap wyniki/poziomka_liczby_slownie
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ import time
 from pathlib import Path
 
 KATALOG_PROJEKTU = Path(__file__).resolve().parent.parent
-POLA = ("id", "tekst", "sekundy", "glos", "zrodlo_id", "rola", "tura", "temat", "czesc", "jakosc", "pytanie")
+POLA = ("id", "tekst", "tekst_slowny", "sekundy", "glos", "zrodlo_id", "rola", "tura", "temat", "czesc", "jakosc", "pytanie")
 
 
 def z_plikow(wyniki: Path) -> list[dict]:
@@ -54,6 +59,9 @@ def z_plikow(wyniki: Path) -> list[dict]:
             if wiersz.strip():
                 wpis = json.loads(wiersz)
                 wpis["sciezka"] = str((wyniki / wpis["audio"]).resolve())
+                if "tekst_cyfry" in wpis:  # synteza z tekstu słownego (liczby/normalizuj.py): trenujemy na cyfrach
+                    wpis["tekst_slowny"] = wpis["tekst"]
+                    wpis["tekst"] = wpis.pop("tekst_cyfry")
                 wiersze.append(wpis)
     brak = [w["sciezka"] for w in wiersze if not Path(w["sciezka"]).is_file()]
     if brak:
@@ -110,6 +118,8 @@ def main() -> None:
     p.add_argument("--rozmow-val", type=int, default=300, help="ile całych rozmów odłożyć do walidacji")
     p.add_argument("--szablon", default=str(KATALOG_PROJEKTU / "trening" / "config" / "polski_100m.json"))
     p.add_argument("--dodaj", action="append", default=[], help="katalog dodatkowej syntezy (manifest.jsonl + audio/), tylko do treningu")
+    p.add_argument("--zastap", action="append", default=[],
+                   help="katalog ponownej syntezy: klipy o tych samych id dostają nowe audio (podział bez zmian)")
     p.add_argument("--dodaj-val", action="append", default=[], metavar="NAZWA=KATALOG",
                    help="dodatkowy zbiór walidacyjny: klipy z KATALOG -> dane/bluetts_val_NAZWA.csv")
     args = p.parse_args()
@@ -149,8 +159,24 @@ def main() -> None:
     rozmowy_val = {str(w["zrodlo_id"]) for w in wiersze if w["podzial"] != "train"}
 
     znane = set(identyfikatory)
-    for katalog in args.dodaj:
-        nowe = [w for w in z_plikow(Path(katalog)) if w["id"] not in znane]
+    dodatkowe = {}
+    for katalog in args.zastap:
+        po_id = {w["id"]: i for i, w in enumerate(wiersze)}
+        nowe = z_plikow(Path(katalog))
+        stare_s = nowe_s = 0.0
+        for w in nowe:
+            if w["id"] in po_id:
+                stary = wiersze[po_id[w["id"]]]
+                stare_s += stary["sekundy"]
+                nowe_s += w["sekundy"]
+                wiersze[po_id[w["id"]]] = {**stary, **{k: v for k, v in w.items() if v is not None}, "podzial": stary["podzial"]}
+        reszta = [w for w in nowe if w["id"] not in po_id]
+        print(f"Zastąpione z {katalog}: {len(nowe) - len(reszta)} klipów ({stare_s / 3600:.1f} h -> {nowe_s / 3600:.1f} h); "
+              f"nowych id: {len(reszta)}")
+        if reszta:
+            dodatkowe[katalog] = reszta
+    for katalog in args.dodaj + list(dodatkowe):
+        nowe = [w for w in (dodatkowe.get(katalog) or z_plikow(Path(katalog))) if w["id"] not in znane]
         kolizje = sum(1 for w in nowe if str(w["zrodlo_id"]) in rozmowy_val)
         if kolizje:
             sys.exit(f"{katalog}: {kolizje} klipów z rozmów walidacyjnych — wybierz teksty z --pomin teksty/wybrane.jsonl")
