@@ -58,15 +58,52 @@ def zloz(partia, porcja):
     return idx, torch.stack([F.pad(x, (0, n - x.shape[0])) for _, x in partia]), [x.shape[0] for _, x in partia]
 
 
+
+def licz(rank: int, z: dict) -> None:
+    """Jeden proces na kartę: partie rank, rank + n, ... zapisywane do wspólnego pliku (memmap)."""
+    device = torch.device(z["urzadzenia"][rank])
+    ae = z["cfg"]["ae"]
+    spec = ae["encoder"].get("spec_processor", {})
+    sr, porcja, ccf = z["sr"], z["porcja"], z["ccf"]
+    mel = LinearMelSpectrogram(sample_rate=spec.get("sample_rate", sr), n_fft=spec.get("n_fft", 2048),
+                               win_length=spec.get("win_length", spec.get("n_fft", 2048)),
+                               hop_length=spec.get("hop_length", 512), n_mels=spec.get("n_mels", 228)).to(device)
+    enc = LatentEncoder(cfg=ae["encoder"]).to(device)
+    enc.load_state_dict(torch.load(z["ae_checkpoint"], map_location="cpu")["encoder"])
+    enc.eval().requires_grad_(False)
+    n = len(z["urzadzenia"])
+    moje = z["partie"][rank::n]
+
+    class Partie(torch.utils.data.Sampler):
+        def __iter__(self): return iter(moje)
+        def __len__(self): return len(moje)
+
+    mm = np.load(z["plik"], mmap_mode="r+")
+    przes, klatki = z["przes"], z["klatki"]
+    loader = DataLoader(Klipy(z["sciezki"], sr), batch_sampler=Partie(), num_workers=z["num_workers"],
+                        collate_fn=functools.partial(zloz, porcja=porcja))
+    with torch.no_grad():
+        for nr, (idx, x, dl) in enumerate(loader, 1):
+            x = x.to(device)
+            lat = compress_latents(enc(mel(x)), factor=ccf).float().cpu().numpy()   # [B, 144, T]
+            for j, i in enumerate(idx):
+                mm[przes[i] : przes[i] + klatki[i]] = lat[j, :, : klatki[i]].T.astype(np.float16)
+            if rank == 0 and (nr % 100 == 0 or nr == len(moje)):
+                print(f"  karta 0: {nr}/{len(moje)} partii (razem {len(z['partie'])})  [{time.time() - z['t0']:.0f} s]",
+                      flush=True)
+    mm.flush()
+    del mm
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--metadata", nargs="+", required=True, help="pliki CSV trenera (bluetts_train.csv, bluetts_val.csv)")
     p.add_argument("--config", default="config/polski_100m.json")
     p.add_argument("--ae_checkpoint", required=True)
     p.add_argument("--wyjscie", required=True)
-    p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu",
+                   help="karta albo kilka po przecinku, np. cuda:1,cuda:2 (partie dzielone między nie)")
     p.add_argument("--sekund_na_partie", type=float, default=600.0, help="budżet dopełnionej długości partii")
-    p.add_argument("--num_workers", type=int, default=8)
+    p.add_argument("--num_workers", type=int, default=8, help="procesy wczytujące na każdą kartę")
     args = p.parse_args()
 
     cfg = json.load(open(args.config, encoding="utf-8"))
@@ -76,16 +113,12 @@ def main() -> None:
     hop = int(spec.get("hop_length", 512))
     ccf = int(cfg["ttl"]["chunk_compress_factor"])
     porcja = hop * ccf
-    device = torch.device(args.device)
 
-    mel = LinearMelSpectrogram(sample_rate=spec.get("sample_rate", sr), n_fft=spec.get("n_fft", 2048),
-                               win_length=spec.get("win_length", spec.get("n_fft", 2048)), hop_length=hop,
-                               n_mels=spec.get("n_mels", 228)).to(device)
-    enc = LatentEncoder(cfg=ae["encoder"]).to(device)
-    ckpt = torch.load(args.ae_checkpoint, map_location="cpu")
-    enc.load_state_dict(ckpt["encoder"])
-    enc.eval().requires_grad_(False)
+    urzadzenia = [d.strip() for d in args.device.split(",")]
+    enc = LatentEncoder(cfg=ae["encoder"])
+    enc.load_state_dict(torch.load(args.ae_checkpoint, map_location="cpu")["encoder"])
     odcisk = encoder_fingerprint(enc.state_dict())[:12]
+    del enc
 
     sciezki = []
     for m in args.metadata:
@@ -117,23 +150,16 @@ def main() -> None:
         na_partie = max(1, int(args.sekund_na_partie // (k * porcja / sr)))
         partie += [ids[j:j + na_partie] for j in range(0, len(ids), na_partie)]
 
-    class Partie(torch.utils.data.Sampler):
-        def __iter__(self): return iter(partie)
-        def __len__(self): return len(partie)
-
-    loader = DataLoader(Klipy(sciezki, sr), batch_sampler=Partie(), num_workers=args.num_workers,
-                        collate_fn=functools.partial(zloz, porcja=porcja))
-    t0 = time.time()
-    with torch.no_grad():
-        for nr, (idx, x, dl) in enumerate(loader, 1):
-            x = x.to(device)
-            z = compress_latents(enc(mel(x)), factor=ccf)            # [B, 144, T]
-            z = z.float().cpu().numpy()
-            for j, i in enumerate(idx):
-                mm[przes[i] : przes[i] + klatki[i]] = z[j, :, : klatki[i]].T.astype(np.float16)
-            if nr % 100 == 0 or nr == len(partie):
-                print(f"  {nr}/{len(partie)} partii  [{time.time() - t0:.0f} s]", flush=True)
     mm.flush(); del mm
+    t0 = time.time()
+    zadanie = dict(cfg=cfg, ae_checkpoint=args.ae_checkpoint, sciezki=sciezki, sr=sr, porcja=porcja, ccf=ccf,
+                   partie=partie, przes=przes, klatki=klatki, plik=plik + ".tmp", num_workers=args.num_workers,
+                   urzadzenia=urzadzenia, t0=t0)
+    if len(urzadzenia) == 1:
+        licz(0, zadanie)
+    else:
+        print(f"Karty: {', '.join(urzadzenia)} (każda co {len(urzadzenia)}. partię)")
+        torch.multiprocessing.spawn(licz, args=(zadanie,), nprocs=len(urzadzenia), join=True)
     os.replace(plik + ".tmp", plik)
 
     indeks = {"odcisk_enkodera": odcisk, "sample_rate": sr, "hop": hop, "ccf": ccf, "kanaly": C,
