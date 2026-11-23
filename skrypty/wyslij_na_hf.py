@@ -14,6 +14,7 @@ Przykłady:
   python skrypty/wyslij_na_hf.py --repo UZYTKOWNIK/NAZWA
   python skrypty/wyslij_na_hf.py --repo UZYTKOWNIK/NAZWA --tylko-pakuj
   python skrypty/wyslij_na_hf.py --repo UZYTKOWNIK/NAZWA --tylko-wyslij --publiczne
+  python skrypty/wyslij_na_hf.py --repo UZYTKOWNIK/NAZWA-czyste --wyniki KATALOG --usun KATALOG/asr/usun.txt
 """
 
 from __future__ import annotations
@@ -136,7 +137,17 @@ def zapisz_plik(sciezka: Path, wpisy: list[dict], schemat_pa, KOLUMNY: list[tupl
     tymczasowy.rename(sciezka)
 
 
-def karta(repo: str, wiersze: list[dict], czestotliwosc: int, zrodlo_tekstow: str) -> str:
+def karta(repo: str, wiersze: list[dict], czestotliwosc: int, zrodlo_tekstow: str, usuniete: int = 0) -> str:
+    if usuniete:
+        opis_filtra = (
+            f"**Zbiór po filtrze ASR.** Usunięto {usuniete} klipów ({100 * usuniete / (usuniete + len(wiersze)):.0f}%) "
+            "o najwyższym błędzie znakowym między tekstem a transkrypcją "
+            "[Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra) (`skrypty/czysc_asr.py`). "
+            "Kolumna `text` to dalej tekst podany modelowi, a nie transkrypcja — drobne przekręcenia mogły zostać.")
+    else:
+        opis_filtra = (
+            "**Klipy nie przeszły jeszcze filtra jakości.** Kolumna `text` to tekst podany modelowi, a nie zapis tego,\n"
+            "co model faktycznie powiedział — część klipów może mieć pominięte lub przekręcone słowa.")
     godziny = sum(w["sekundy"] for w in wiersze) / 3600
     glosy = sorted({str(w.get("glos")) for w in wiersze})
     tryby = sorted({str(w.get("tryb_glosu")) for w in wiersze})
@@ -185,8 +196,7 @@ configs:
 Syntetyczna polska mowa: {godziny:.1f} h, {len(wiersze)} klipów, jeden głos, {czestotliwosc // 1000} kHz mono (FLAC).
 Zbiór powstał do trenowania małych polskich modeli TTS (destylacja z VoxCPM2).
 
-**Klipy nie przeszły jeszcze filtra jakości.** Kolumna `text` to tekst podany modelowi, a nie zapis tego,
-co model faktycznie powiedział — część klipów może mieć pominięte lub przekręcone słowa.
+{opis_filtra}
 
 ## Jak powstał
 
@@ -281,6 +291,8 @@ def main() -> None:
     p.add_argument("--repo", required=True, help="repo datasetu na HF, np. uzytkownik/nazwa")
     p.add_argument("--wyniki", default=str(KATALOG_PROJEKTU / "wyniki" / "poziomka"), help="katalog z manifest.jsonl i audio/")
     p.add_argument("--paczki", help="katalog na pliki parquet (domyślnie <wyniki>_parquet)")
+    p.add_argument("--usun", action="append", default=[],
+                   help="plik z id klipów do pominięcia (usun.txt z czysc_asr.py): wysyłka zbioru po filtrze")
     p.add_argument("--mb-na-plik", type=int, default=500)
     p.add_argument("--zrodlo-tekstow", default="[cpral/polskie-sprawy-v8-jakosc50](https://huggingface.co/datasets/cpral/polskie-sprawy-v8-jakosc50)")
     p.add_argument("--plikow-na-commit", type=int, default=10, help="ile plików parquet w jednej partii wysyłki (jeden commit)")
@@ -292,7 +304,8 @@ def main() -> None:
         p.error("--tylko-pakuj i --tylko-wyslij wykluczają się")
 
     wyniki = Path(args.wyniki)
-    paczki = Path(args.paczki) if args.paczki else wyniki.with_name(wyniki.name + "_parquet")
+    # zbiór po filtrze ma własny katalog paczek, żeby nie mieszać się z surowym
+    paczki = Path(args.paczki) if args.paczki else wyniki.with_name(wyniki.name + ("_czyste_parquet" if args.usun else "_parquet"))
 
     gotowe = paczki_kompletne(paczki)
     if gotowe and not args.tylko_wyslij:
@@ -303,6 +316,11 @@ def main() -> None:
 
         t0 = time.time()
         wiersze = wczytaj_manifest(wyniki)
+        wszystkich = len(wiersze)
+        if args.usun:
+            do_usuniecia = {w.strip() for plik in args.usun for w in Path(plik).read_text(encoding="utf-8").splitlines() if w.strip()}
+            wiersze = [w for w in wiersze if w["id"] not in do_usuniecia]
+            print(f"Filtr: pomijam {wszystkich - len(wiersze)} z {wszystkich} klipów (lista: {len(do_usuniecia)} id)")
         pliki = zaplanuj_pliki(wyniki, wiersze, args.mb_na_plik)
         razem = sum(w["_bajty"] for w in wiersze)
         czestotliwosc = sf.info(str(wiersze[0]["_sciezka"])).samplerate
@@ -327,7 +345,7 @@ def main() -> None:
             zapisz_plik(nazwa, wpisy, schemat_pa, kol)
             if nr % 10 == 0 or nr == len(do_zapisu):
                 print(f"  zapisano {nr}/{len(do_zapisu)} plików  [{time.time() - t0:.0f} s]", flush=True)
-        (paczki / "README.md").write_text(karta(args.repo, wiersze, czestotliwosc, args.zrodlo_tekstow), encoding="utf-8")
+        (paczki / "README.md").write_text(karta(args.repo, wiersze, czestotliwosc, args.zrodlo_tekstow, wszystkich - len(wiersze)), encoding="utf-8")
         print(f"Karta datasetu: {paczki / 'README.md'}")
 
     if args.tylko_pakuj:

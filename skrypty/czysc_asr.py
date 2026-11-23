@@ -43,6 +43,13 @@ KATALOG_PROJEKTU = Path(__file__).resolve().parent.parent
 
 
 def wczytaj_manifest(katalog: Path) -> list[dict]:
+    """Klipy z manifest.jsonl (katalog syntezy) albo z metadane.jsonl (katalog dane/ po przygotuj_audio.py)."""
+    if not (katalog / "manifest.jsonl").is_file() and (katalog / "metadane.jsonl").is_file():
+        wiersze = [json.loads(w) for w in (katalog / "metadane.jsonl").open(encoding="utf-8") if w.strip()]
+        for w in wiersze:
+            w["audio"] = w["sciezka"]  # ścieżka bezwzględna; katalog / bezwzględna = bezwzględna
+            w["tekst"] = w.get("tekst_slowny") or w["tekst"]  # to, co dostał nauczyciel
+        return wiersze
     wiersze = []
     with (katalog / "manifest.jsonl").open(encoding="utf-8") as plik:
         for w in plik:
