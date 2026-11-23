@@ -2,6 +2,7 @@ from collections import OrderedDict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .modules import CausalConv1d, CausalConvNeXtBlock
 
@@ -46,6 +47,46 @@ class VocoderHead(nn.Module):
         x = x.transpose(1, 2).contiguous()
         x = x.reshape(x.shape[0], -1)
         return x
+
+class ISTFTHead(nn.Module):
+    """Głowica w stylu Vocos: na każdą klatkę (co `hop` próbek) widmo ramki `n_fft` (log-amplituda i faza), dźwięk przez
+    odwrotne FFT, okno Hanna i sumowanie nakładających się ramek (overlap-add). Kawałki nie są sklejane „na styk”,
+    tylko przenikają się na długości okna, więc granice klatek nie zostawiają okresowego śladu.
+
+    Ramka klatki k jest wyśrodkowana na jej odcinku [k·hop, (k+1)·hop): na próbkę wpływają klatki do 2 w przód
+    (przy n_fft 2048 i hop 512), czyli dekoder z tą głowicą nie jest przyczynowy (ok. 21 ms wyprzedzenia przy 48 kHz).
+    Pierwsza warstwa ma ten sam kształt co w VocoderHead (`layer1`), więc da się ją przenieść ze starego dekodera."""
+
+    def __init__(self, dim=512, hdim=2048, n_fft=2048, hop=512, kernel_size=3, pad_mode="zeros"):
+        super().__init__()
+        if n_fft % hop or n_fft < hop:
+            raise ValueError(f"n_fft ({n_fft}) musi być wielokrotnością hop ({hop})")
+        self.n_fft, self.hop = n_fft, hop
+        self.layer1 = CausalInputProjection(dim, hdim, kernel_size=kernel_size, pad_mode=pad_mode)
+        self.act = nn.PReLU()
+        self.out = nn.Conv1d(hdim, n_fft + 2, kernel_size=1)
+        nn.init.normal_(self.out.weight, 0, 0.01)
+        nn.init.zeros_(self.out.bias)
+        with torch.no_grad():
+            self.out.bias[: n_fft // 2 + 1] = -4.0   # cichy start: amplitudy ok. e^-4
+        self.register_buffer("window", torch.hann_window(n_fft), persistent=False)
+
+    def forward(self, x):
+        h = self.out(self.act(self.layer1(x)))                         # [B, n_fft + 2, T]
+        B, _, T = h.shape
+        nb = self.n_fft // 2 + 1
+        mag = torch.exp(h[:, :nb].float().clamp(max=6.0))
+        faza = h[:, nb:].float()
+        widmo = torch.complex(mag * torch.cos(faza), mag * torch.sin(faza))
+        ramki = torch.fft.irfft(widmo, n=self.n_fft, dim=1) * self.window[None, :, None]   # [B, n_fft, T]
+        L = (T - 1) * self.hop + self.n_fft
+        fold = lambda r: F.fold(r, output_size=(1, L), kernel_size=(1, self.n_fft), stride=(1, self.hop)).reshape(r.shape[0], L)
+        y = fold(ramki)
+        obw = fold((self.window ** 2)[None, :, None].expand(1, self.n_fft, T))[0]      # suma okien^2
+        y = y / obw.clamp(min=0.1)
+        start = (self.n_fft - self.hop) // 2                            # ramka k wyśrodkowana na swoim odcinku
+        return y[:, start: start + T * self.hop]
+
 
 # Defaults based on configs/tts.json -> ae.decoder (the 1.5M decoder). The replicate variant: E12b and Supertonic-3.
 DEFAULT_DECODER_CFG = {
@@ -103,13 +144,23 @@ class LatentDecoder1D(nn.Module):
                 f"Decoder head idim={head_input_dim} must match decoder hdim={dim}"
             )
 
-        self.head = VocoderHead(
-            dim=head_input_dim,
-            hdim=head_cfg['hdim'],
-            out_dim=head_cfg['odim'],
-            kernel_size=int(head_cfg.get('ksz', 3)),
-            pad_mode=pad_mode,
-        )
+        if head_cfg.get('type', 'patch') == 'istft':
+            self.head = ISTFTHead(
+                dim=head_input_dim,
+                hdim=head_cfg['hdim'],
+                n_fft=int(head_cfg.get('n_fft', 2048)),
+                hop=int(head_cfg.get('hop', head_cfg['odim'])),
+                kernel_size=int(head_cfg.get('ksz', 3)),
+                pad_mode=pad_mode,
+            )
+        else:
+            self.head = VocoderHead(
+                dim=head_input_dim,
+                hdim=head_cfg['hdim'],
+                out_dim=head_cfg['odim'],
+                kernel_size=int(head_cfg.get('ksz', 3)),
+                pad_mode=pad_mode,
+            )
 
     def _prepare_latents(self, x):
         if x.dim() != 3:

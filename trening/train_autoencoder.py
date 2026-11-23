@@ -543,6 +543,12 @@ def main():
     parser.add_argument('--init_ae', type=str, default=None, help='Kodek startowy (.pt z "encoder" i "decoder", np. ae_wsm_210_220.pt)')
     parser.add_argument('--init_disc', type=str, default=None,
                         help='Dyskryminatory startowe z punktu kontrolnego treningu (.pt z "mpd" i "mrd", np. ae_220000.pt); bez tego od zera')
+    parser.add_argument('--decoder_head', choices=['patch', 'istft'], default=None,
+                        help='Głowica dekodera: patch (512 próbek na klatkę, sklejane) albo istft (widmo + overlap-add, jak Vocos). '
+                             'Z --init_ae starego dekodera nowa głowica startuje od zera, reszta dekodera z wag')
+    parser.add_argument('--istft_n_fft', type=int, default=2048, help='Długość ramki głowicy istft (wielokrotność 512)')
+    parser.add_argument('--head_warmup', type=int, default=0,
+                        help='Przez pierwsze N kroków uczy się tylko głowica dekodera (reszta dekodera stoi), potem cały dekoder')
     parser.add_argument('--d_warmup', type=int, default=0, help='Discriminators frozen, reconstruction-only loss for the first N steps')
     parser.add_argument('--stage2', action='store_true', help='Resume an --encoder_only checkpoint (--resume) with the decoder trainable')
     # --- Paper losses (defaults reproduce the 1.5M-step recipe) ---
@@ -567,7 +573,8 @@ def main():
                         help='Causal padding of the decoder (default: the config, zeros; E12b uses replicate)')
     parser.add_argument('--continue_cosine', type=int, default=None,
                         help='With --resume: keep the step counter and optimizer state, restart the cosine from --lr over N steps')
-    parser.add_argument('--lr_warmup', type=int, default=0, help='With --continue_cosine: linear warm-up steps from 1%% of --lr')
+    parser.add_argument('--lr_warmup', type=int, default=0,
+                        help='Z --continue_cosine albo --constant_lr: liniowa rozgrzewka tempa od 1%% --lr przez N kroków')
     args = parser.parse_args()
     if args.stage2 and args.encoder_only: raise SystemExit("--stage2 trains the decoder: drop --encoder_only")
     if args.decoder_only and (args.encoder_only or args.stage2 or args.init_encoder):
@@ -585,8 +592,8 @@ def main():
     if args.constant_lr and args.continue_cosine: raise SystemExit("--constant_lr i --continue_cosine wykluczają się")
     if args.continue_cosine and not args.resume:
         raise SystemExit("--continue_cosine needs --resume")
-    if args.lr_warmup and not args.continue_cosine:
-        raise SystemExit("--lr_warmup needs --continue_cosine")
+    if args.lr_warmup and not (args.continue_cosine or args.constant_lr):
+        raise SystemExit("--lr_warmup needs --continue_cosine or --constant_lr")
     freeze_bn = args.tail_consistency > 0 and not args.no_bn_freeze
     ckpt_dir = args.checkpoint_dir
 
@@ -626,6 +633,12 @@ def main():
                             collate_fn=collate_fn_edge if args.edge_aware else collate_fn, pin_memory=True, persistent_workers=True, prefetch_factor=2)
     decoder_cfg = dict(ae_cfg['decoder'])
     if args.decoder_pad_mode: decoder_cfg['pad_mode'] = args.decoder_pad_mode
+    if args.decoder_head == 'istft':
+        decoder_cfg['head'] = {**decoder_cfg['head'], 'type': 'istft', 'n_fft': args.istft_n_fft, 'hop': HOP}
+    elif args.decoder_head == 'patch':
+        decoder_cfg['head'] = {k: v for k, v in decoder_cfg['head'].items() if k not in ('type', 'n_fft', 'hop')}
+    ae_cfg = {**ae_cfg, 'decoder': decoder_cfg}   # zapisywane w punktach kontrolnych: dalsze skrypty budują ten sam dekoder
+    if args.head_warmup and not args.decoder_only: raise SystemExit("--head_warmup tylko z --decoder_only")
     ckpt = torch.load(args.resume, map_location='cpu') if args.resume else None
 
     encoder = LatentEncoder(cfg=ae_cfg['encoder']).to(device)
@@ -673,7 +686,11 @@ def main():
     betas = tuple(train_cfg.get('betas', (0.8, 0.99)))
     wd = float(train_cfg.get('weight_decay', 0.01))
     enc_named = list(_mod(encoder).named_parameters())
-    if args.decoder_only: g_groups = param_groups(list(_mod(decoder).named_parameters()), lr, no_decay_norms)
+    if args.decoder_only:
+        _dec = list(_mod(decoder).named_parameters())
+        _cialo = param_groups([(n, p) for n, p in _dec if not n.startswith('head.')], lr, no_decay_norms)
+        for g in _cialo: g['cialo_dekodera'] = True   # --head_warmup: tempo 0 przez pierwsze kroki
+        g_groups = _cialo + param_groups([(n, p) for n, p in _dec if n.startswith('head.')], lr, no_decay_norms)
     elif args.encoder_only or args.stage2: g_groups = param_groups(enc_named, lr, no_decay_norms)
     else: g_groups = param_groups(enc_named + list(_mod(decoder).named_parameters()), lr, no_decay_norms)
     # stage 2: decoder groups after the encoder's, so a stage-1 optimizer state still loads
@@ -693,7 +710,19 @@ def main():
     if args.init_ae:
         _ae = torch.load(args.init_ae, map_location=device)
         _mod(encoder).load_state_dict({k.replace('module.', ''): v for k, v in _ae['encoder'].items()}, strict=True)
-        _mod(decoder).load_state_dict({k.replace('module.', ''): v for k, v in _ae['decoder'].items()}, strict=True)
+        _sd = {k.replace('module.', ''): v for k, v in _ae['decoder'].items()}
+        _glowica_stara = _ae.get('ae_config', {}).get('decoder', {}).get('head', {}).get('type', 'patch')
+        _glowica_nowa = decoder_cfg['head'].get('type', 'patch')
+        if _glowica_stara == _glowica_nowa:
+            _mod(decoder).load_state_dict(_sd, strict=True)
+        else:
+            # inna głowica: przenosimy wszystko o zgodnych kształtach (ciało dekodera, pierwsza warstwa głowicy)
+            _cel = _mod(decoder).state_dict()
+            _zgodne = {k: v for k, v in _sd.items() if k in _cel and _cel[k].shape == v.shape}
+            _mod(decoder).load_state_dict(_zgodne, strict=False)
+            if args.local_rank == 0:
+                logger.info(f"Głowica {_glowica_stara} -> {_glowica_nowa}: z {args.init_ae} przeniesiono {len(_zgodne)} tensorów, "
+                            f"od zera: {sorted(k for k in _cel if k not in _zgodne)}")
         if args.local_rank == 0:
             from training.utils import encoder_fingerprint
             logger.info(f"Kodek startowy {args.init_ae}: enkoder {encoder_fingerprint(_mod(encoder).state_dict())[:12]}"
@@ -717,9 +746,12 @@ def main():
         # Stałe tempo uczenia --lr od bieżącego kroku (pod WSM: model końcowy z uśrednienia punktów kontrolnych, bez wygaszania).
         for opt in (opt_g, opt_d):
             for g in opt.param_groups: g['lr'] = g['initial_lr'] = lr
-        schedulers = {k: torch.optim.lr_scheduler.LambdaLR(o, lambda _: 1.0) for k, o in (('scheduler_g', opt_g), ('scheduler_d', opt_d))}
+        # z --lr_warmup: liniowo od 1% do --lr przez N kroków (licząc od startu tego przebiegu), potem stałe
+        _w = args.lr_warmup
+        _f = (lambda s: min(1.0, 0.01 + 0.99 * s / _w)) if _w else (lambda _: 1.0)
+        schedulers = {k: torch.optim.lr_scheduler.LambdaLR(o, _f) for k, o in (('scheduler_g', opt_g), ('scheduler_d', opt_d))}
         lr_sched = schedulers['scheduler_g']
-        if args.local_rank == 0: logger.info(f"Stałe tempo uczenia {lr} od kroku {step}")
+        if args.local_rank == 0: logger.info(f"Stałe tempo uczenia {lr} od kroku {step}" + (f", rozgrzewka {_w} kroków" if _w else ""))
     if lr_schedule == 'plateau':
         dec_from = ckpt.get('dec_trainable_from', step) if args.stage2 else None   # the decoder lr ramps from here
         for i, g in enumerate(opt_g.param_groups):
@@ -808,6 +840,10 @@ def main():
         for batch in pbar:
             if step >= args.total_steps: break
             if lr_schedule == 'plateau': lr_sched.step(step)
+            if args.head_warmup and step < args.head_warmup:   # potem tempo ustawia znowu harmonogram (krok po kroku)
+                for g in opt_g.param_groups:
+                    if g.get('cialo_dekodera'): g['lr'] = 0.0
+                if step == args.head_warmup and args.local_rank == 0: logger.info(f"Krok {step}: cały dekoder w treningu")
             result = train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_transforms_loss, opt_g, opt_d, device, crop_len, logger,
                                 update_discriminator=(step > args.d_warmup), recon_only=(0 < args.d_warmup and step <= args.d_warmup),
                                 recon_full_segment=(recon != 'linmel_12k'),

@@ -45,7 +45,10 @@ def krok(sciezka: str) -> int:
     return int(m.group(1)) if m else -1
 
 
-def zbuduj(ae_cfg: dict, device):
+def zbuduj(ae_cfg: dict, device, ckpt: dict | None = None):
+    """Enkoder i dekoder; budowa dekodera z ae_config punktu kontrolnego, jeśli jest (np. inna głowica niż w konfiguracji)."""
+    if ckpt is not None and "ae_config" in ckpt:
+        ae_cfg = {**ae_cfg, "decoder": ckpt["ae_config"]["decoder"]}
     enc = LatentEncoder(cfg=ae_cfg["encoder"]).to(device)
     dec = LatentDecoder1D(cfg=dict(ae_cfg["decoder"])).to(device)
     return enc, dec
@@ -150,7 +153,7 @@ def main() -> None:
     print(f"Odłożone klipy: {len(odlozone)}, {sum(c.shape[-1] for c in odlozone) / sr / 60:.1f} min; "
           f"punkty kontrolne: {', '.join(os.path.basename(s) for s in sciezki)}")
 
-    enc, dec = zbuduj(ae_cfg, device)
+    enc, dec = zbuduj(ae_cfg, device, torch.load(sciezki[-1], map_location="cpu", weights_only=False))
     stany_enc, stany_dec, kroki = [], [], []
     print(f"{'model':<28} {'recon':>9} {'log-mel całe pasmo':>19}")
     for s in sciezki:
@@ -168,7 +171,8 @@ def main() -> None:
     print(f"{'średnia (' + str(len(sciezki)) + ' punktów)':<28} {w['recon']:>9.4f} {w['logmel_full']:>19.4f}")
 
     def zapisz(sciezka: str, opis: str, wynik: dict):
-        torch.save({"encoder": enc.state_dict(), "decoder": dec.state_dict(), "ae_config": ae_cfg, "step": max(kroki),
+        _ae = {**ae_cfg, "decoder": torch.load(sciezki[-1], map_location="cpu", weights_only=False).get("ae_config", ae_cfg)["decoder"]}
+        torch.save({"encoder": enc.state_dict(), "decoder": dec.state_dict(), "ae_config": _ae, "step": max(kroki),
                     "wsm": {"punkty": [os.path.basename(s) for s in sciezki], "opis": opis, "ocena": wynik}}, sciezka)
         if args.eval_input:
             probka(enc, dec, mel_transform, args.eval_input, os.path.splitext(sciezka)[0] + "_probka.wav", sr, device)

@@ -37,11 +37,16 @@ from training.t2l.sampling import build_reference_only, sample_audio, set_audio_
 from training.utils import compress_latents
 
 
-def wczytaj_kodek(sciezka, enc, dec):
-    ckpt = torch.load(sciezka, map_location="cpu")
+def wczytaj_kodek(sciezka, enc, dec, device):
+    """Wagi kodeka; jeśli punkt kontrolny zapisał inną budowę dekodera (np. głowicę istft), dekoder jest budowany od nowa."""
+    from bluecodec.autoencoder.latent_decoder import LatentDecoder1D
+    ckpt = torch.load(sciezka, map_location="cpu", weights_only=False)
+    if "ae_config" in ckpt:
+        dec = LatentDecoder1D(cfg=dict(ckpt["ae_config"]["decoder"])).to(device)
     enc.load_state_dict(ckpt["encoder"], strict=False)
-    dec.load_state_dict(ckpt["decoder"], strict=False)
+    dec.load_state_dict(ckpt["decoder"], strict=True)
     enc.eval().requires_grad_(False); dec.eval().requires_grad_(False)
+    return dec
 
 
 def wczytaj_t2l(sciezka, te, re_, vf, uncond):
@@ -91,7 +96,7 @@ def main() -> None:
         te, re_, vf, uncond, dp, enc, dec, mel, _ = build_models(ttl, ae, sr, dev, dp_ckpt_path=args.dp, dp_cfg=cfg.get("dp", {}))
     if dp is None or not os.path.exists(args.dp):
         raise SystemExit(f"Brak predyktora długości: {args.dp}")
-    wczytaj_kodek(args.ae_checkpoint, enc, dec)
+    dec = wczytaj_kodek(args.ae_checkpoint, enc, dec, dev)
     stats = torch.load(args.stats, map_location=dev)
     mean, std = stats["mean"].to(dev), stats["std"].to(dev)
     if mean.dim() != 3:

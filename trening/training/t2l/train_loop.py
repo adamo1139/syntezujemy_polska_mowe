@@ -333,6 +333,9 @@ def train(
         else:
             ae_encoder.load_state_dict(ckpt, strict=False)
         if "decoder" in ckpt:
+            if isinstance(ckpt.get("ae_config"), dict) and "decoder" in ckpt["ae_config"]:
+                from bluecodec.autoencoder.latent_decoder import LatentDecoder1D
+                ae_decoder = LatentDecoder1D(cfg=dict(ckpt["ae_config"]["decoder"])).to(device)
             ae_decoder.load_state_dict(ckpt["decoder"], strict=False)
         elif any(k.startswith("decoder.") for k in ckpt.keys()):
             ae_decoder.load_state_dict(

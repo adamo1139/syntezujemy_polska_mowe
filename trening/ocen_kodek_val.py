@@ -76,7 +76,7 @@ def main() -> None:
                                hop_length=spec.get("hop_length", 512), win_length=spec.get("win_length", 2048),
                                n_mels=spec.get("n_mels", 228)).to(device)
     miary = {"recon": get_mel_transforms(data_cfg, device), "logmel": get_mel_transforms(data_cfg, device, "logmel_fullband")}
-    enc, dec = zbuduj(ae_cfg, device)
+    enc, dec = zbuduj(ae_cfg, device, torch.load(args.ckpt, map_location="cpu", weights_only=False))
     e, d, krok = wczytaj_wagi(args.ckpt)
     enc.load_state_dict(e); dec.load_state_dict(d)
     enc.eval(); dec.eval()

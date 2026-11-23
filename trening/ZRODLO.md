@@ -66,3 +66,4 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **Walidacja modelu tekst→latenty**: `--val_data` przyjmuje kilka plików (osobne metryki `val_<nazwa>/…`).
 - **`ocen_kodek_val.py`**: ocena kodeka na całych klipach walidacyjnych (recon, log-mel, LSD w pasmach), osobno dla każdego CSV.
 - **Kodek, dotrenowanie dekodera**: `--decoder_only` (enkoder zamrożony), `--init_ae`, `--init_disc`, `--hiband_hz`, `--hiband_floor`.
+- **Kodek, głowica w stylu Vocos**: `ISTFTHead` (widmo ramki 2048 + overlap-add, `ae.decoder.head.type = "istft"`), `--decoder_head`, `--head_warmup`; `--lr_warmup` także ze stałym tempem; skrypty budują dekoder według `ae_config` z punktu kontrolnego.
