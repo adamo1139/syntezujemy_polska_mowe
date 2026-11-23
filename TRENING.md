@@ -372,6 +372,29 @@ python skrypty/przygotuj_audio.py --zastap wyniki/poziomka_liczby_slownie --usun
 
 Potem latenty od nowa (polecenie z sekcji 6) i dotrenowanie predyktora długości i modelu tekst→latenty.
 
+### 6c. Czyste dane i restart od kroku 200 000 z dekoderem z modułem poprawki
+
+Po filtrze ASR obu zbiorów (najgorsze 10% według CER, `usun.txt`). Trening musi być zatrzymany, zanim ruszą
+latenty (plik `dane/latenty/latenty.npy` jest podmieniany).
+
+```bash
+# z katalogu repo, środowisko syntezy: nowe nagrania liczb + usunięcie odrzuconych klipów z obu zbiorów
+python skrypty/przygotuj_audio.py --zastap wyniki/poziomka_liczby_slownie \
+  --usun wyniki/poziomka_liczby_slownie/asr/usun.txt --usun wyniki/poziomka/asr/usun.txt
+grep -c "poziomka_liczby/" dane/bluetts_train.csv   # 0 = w treningu nie został żaden stary klip z liczbami
+
+# z trening/, środowisko treningowe: latenty od nowa (ścieżki klipów z liczbami są nowe; enkoder ten sam)
+python policz_latenty.py --metadata ../dane/bluetts_train.csv ../dane/bluetts_val.csv ../dane/bluetts_val_liczby.csv \
+  --ae_checkpoint ../modele/kodek_48k_postnet/ae_wsm_6_9.pt --wyjscie ../dane/latenty --device cuda:1
+
+# nowy katalog przebiegu z samym punktem 200 000 (twarde dowiązanie; EMA jest w środku punktu)
+mkdir -p ../modele/t2l_czyste && ln ../modele/t2l/kamienie/ckpt_step_200000.pt ../modele/t2l_czyste/
+```
+
+Polecenie treningu jak w sekcji 5, zmienione trzy argumenty: `--ae_checkpoint ../modele/kodek_48k_postnet/ae_wsm_6_9.pt`,
+`--out ../modele/t2l_czyste`, `--wandb_name t2l-100m-czyste` (nowy katalog = nowa sesja wandb). Dekoder służy
+w trenerze tylko do próbek odsłuchowych; strata liczy się na latentach, a enkoder jest ten sam.
+
 ## 7. Brzmienie syntezy: odsłuchy i wybrany łańcuch (2026-11-23)
 
 Problem: synteza modelu tekst→latenty (punkt 115k) ma „cierpkość”, której nie ma w nagraniach VoxCPM2.
