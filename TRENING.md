@@ -359,8 +359,8 @@ python skrypty/wyslij_na_hf.py --repo RockTheBoat/VoxCPM2-pol-one-voice-liczby-s
 ```
 
 Czyszczenie przez ASR (`skrypty/czysc_asr.py`, Parakeet Ultra przez Photon; osobne środowisko z
-`uv pip install moondream sentence-transformers morfeusz2 rapidfuzz`). Transkrypcja przechodzi przez ten sam
-normalizator co tekst, potem idzie porównanie: CER/WER, podobieństwo embeddingów (multilingual-e5-large), ucięty
+`uv pip install moondream morfeusz2 rapidfuzz`). Transkrypcja przechodzi przez ten sam
+normalizator co tekst, potem idzie porównanie: CER/WER, ucięty
 koniec, dopiski, zapętlenia, tempo. Wynik trafia do `<synteza>/asr/` (`raport.txt`, `usun.txt`, `odsluch.txt`,
 `probki/`).
 

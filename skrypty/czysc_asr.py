@@ -9,7 +9,6 @@ Trzy kroki (każdy wznawialny, wyniki w katalogu --praca, domyślnie <katalog sy
          liczby/normalizuj.py (Parakeet pisze liczby cyframi) i tę samą normalizację słów. Miary:
            cer, wer            błąd znakowy (bez spacji) / wyrazowy po normalizacji
            dziura              najdłuższy ciągły fragment niezgodności w znakach (bełkot, pominięcie)
-           cos                 podobieństwo embeddingów (domyślnie intfloat/multilingual-e5-large)
            brak_konca          ostatnie słowa tekstu nie zostały powiedziane (ucięcie)
            dopisek             słowa dopowiedziane na końcu/początku (bełkot, halucynacja)
            powtorzenie         zapętlenie: n-gram powtórzony w ASR częściej niż w tekście
@@ -18,7 +17,7 @@ Trzy kroki (każdy wznawialny, wyniki w katalogu --praca, domyślnie <katalog sy
          i --probki N najgorszych klipów skopiowanych do <praca>/probki/ do odsłuchu.
   Usunięcie z danych: python skrypty/przygotuj_audio.py --zastap KATALOG --usun KATALOG/asr/usun.txt
 
-Przykład (karty 1,2,3,5,6,7, środowisko z `uv pip install moondream sentence-transformers morfeusz2 rapidfuzz`):
+Przykład (karty 1,2,3,5,6,7, środowisko z `uv pip install moondream morfeusz2 rapidfuzz`):
 
   python skrypty/czysc_asr.py asr wyniki/poziomka_liczby_slownie --karty 1,2,3,5,6,7
   python skrypty/czysc_asr.py ocen wyniki/poziomka_liczby_slownie --usun-procent 10 --usun-bez-asr --probki 40
@@ -263,18 +262,6 @@ def krok_ocen(args) -> None:
     for o in oceny:
         o["tempo_z"] = (o["znaki_na_s"] - med) / (1.4826 * mad)
 
-    if not args.bez_embeddingow:
-        from sentence_transformers import SentenceTransformer
-
-        model = SentenceTransformer(args.embeddingi, device=args.urzadzenie)
-        pref = "query: " if "e5" in args.embeddingi else ""
-        ea = model.encode([pref + o["tekst"] for o in oceny], batch_size=256, normalize_embeddings=True,
-                          show_progress_bar=True, convert_to_numpy=True)
-        eb = model.encode([pref + (o["asr"] or "") for o in oceny], batch_size=256, normalize_embeddings=True,
-                          show_progress_bar=True, convert_to_numpy=True)
-        for o, a, b in zip(oceny, ea, eb):
-            o["cos"] = float((a * b).sum())
-
     # decyzja
     usun, odsluch = [], []
     for o in oceny:
@@ -291,13 +278,10 @@ def krok_ocen(args) -> None:
             powody.append(f"zapętlenie (+{o['powtorzenie']})")
         if abs(o["tempo_z"]) > args.max_tempo_z:
             powody.append(f"tempo z={o['tempo_z']:+.1f}")
-        if "cos" in o and o["cos"] < args.min_cos:
-            powody.append(f"cos {o['cos']:.2f}")
         o["powody"] = powody
         if powody:
             usun.append(o)
-        elif (o["cer"] > args.odsluch_cer or o["dziura"] >= args.odsluch_dziura
-              or ("cos" in o and o["cos"] < args.odsluch_cos)):
+        elif o["cer"] > args.odsluch_cer or o["dziura"] >= args.odsluch_dziura:
             odsluch.append(o)
 
     if args.usun_procent:  # prosto: najgorsze N% według CER, progi powyżej nie mają znaczenia
@@ -376,9 +360,6 @@ def main() -> None:
     o = sub.add_parser("ocen", help="porównanie z tekstem, decyzja, raport")
     o.add_argument("katalog")
     o.add_argument("--praca")
-    o.add_argument("--embeddingi", default="intfloat/multilingual-e5-large")
-    o.add_argument("--urzadzenie", default="cuda")
-    o.add_argument("--bez-embeddingow", action="store_true")
     o.add_argument("--usun-bez-asr", action="store_true",
                    help="klipy bez transkrypcji (ASR się nie udał, np. przester) też do usun.txt")
     o.add_argument("--usun-procent", type=float,
@@ -387,12 +368,10 @@ def main() -> None:
     o.add_argument("--max-dziura", type=int, default=12,
                    help="tyle znaków niezgodności w jednym miejscu (bełkot, pominięty fragment): usuń")
     o.add_argument("--odsluch-dziura", type=int, default=8)
-    o.add_argument("--min-cos", type=float, default=0.85, help="poniżej: usuń")
     o.add_argument("--min-brak", type=int, default=2, help="tyle niewypowiedzianych słów na końcu: usuń")
     o.add_argument("--min-dopisek", type=int, default=3, help="tyle dopowiedzianych słów na brzegu: usuń")
     o.add_argument("--max-tempo-z", type=float, default=5.0, help="odchylenie tempa (w MAD): usuń")
     o.add_argument("--odsluch-cer", type=float, default=0.10, help="powyżej (i nie usunięte): do odsłuchu")
-    o.add_argument("--odsluch-cos", type=float, default=0.92)
     o.add_argument("--probki", type=int, default=0, help="skopiuj N najgorszych klipów do odsłuchu")
 
     args = p.parse_args()
