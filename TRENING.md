@@ -371,3 +371,9 @@ Pasmo wysokie zostaje poprawiane stałym korektorem przy syntezie; dekoder dalej
 (prążki na k·93,75 Hz: oryginał 1,7, rekonstrukcja 3,6, synteza 4,6 ponad tło). Trening: ciało dekodera z
 `ae_wsm_210_220.pt`, nowa ostatnia warstwa głowicy od zera, przez `--head_warmup` kroków uczy się sama głowica,
 tempo głowicy `--lr × --head_lr_scale`, bez straty pasma wysokiego.
+
+**Moduł poprawki zamiast podmiany głowicy** (`--decoder_postnet`, `STFTPostnet`): stara głowica zostaje, na jej
+wyjściu mała sieć (4 bloki ConvNeXt, 5,3M) przewiduje zespoloną maskę widma STFT 2048/512 z widma dźwięku i cech
+ciała dekodera; ostatnia warstwa od zer, więc start = jakość `ae_wsm_210_220.pt`. Przez `--head_warmup` kroków uczy
+się tylko moduł (reszta dekodera z BatchNorm zamrożona), tempo modułu `--lr × --head_lr_scale`, dyskryminatory od
+początku.

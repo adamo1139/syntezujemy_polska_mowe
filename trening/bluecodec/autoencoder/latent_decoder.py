@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .modules import CausalConv1d, CausalConvNeXtBlock
+from .modules import CausalConv1d, CausalConvNeXtBlock, ConvNeXtBlock
 
 
 class CausalInputProjection(nn.Module):
@@ -53,15 +53,21 @@ class ISTFTHead(nn.Module):
     odwrotne FFT, okno Hanna i sumowanie nakładających się ramek (overlap-add). Kawałki nie są sklejane „na styk”,
     tylko przenikają się na długości okna, więc granice klatek nie zostawiają okresowego śladu.
 
-    Ramka klatki k jest wyśrodkowana na jej odcinku [k·hop, (k+1)·hop): na próbkę wpływają klatki do 2 w przód
-    (przy n_fft 2048 i hop 512), czyli dekoder z tą głowicą nie jest przyczynowy (ok. 21 ms wyprzedzenia przy 48 kHz).
+    Wyrównanie ramek (`wyrownanie`):
+      "srodek" (domyślne): ramka klatki k wyśrodkowana na jej odcinku [k·hop, (k+1)·hop), jak okno analizy STFT
+        enkodera, z którego powstał latent klatki k; na próbkę wpływają klatki do 2 w przód (ok. 21 ms przy 48 kHz).
+      "koniec": ramka kończy się razem z odcinkiem klatki (pokrywa go i n_fft/hop − 1 poprzednich).
+    Test na zamrożonym ciele dekodera ae_wsm_210_220 (4 klipy VoxCPM2, 300 kroków samej głowicy, Adam 1e-3, strata
+    mel z treningu kodeka; stara głowica: 1,200): "srodek" 1,451, "koniec" 2,100.
     Pierwsza warstwa ma ten sam kształt co w VocoderHead (`layer1`), więc da się ją przenieść ze starego dekodera."""
 
-    def __init__(self, dim=512, hdim=2048, n_fft=2048, hop=512, kernel_size=3, pad_mode="zeros"):
+    def __init__(self, dim=512, hdim=2048, n_fft=2048, hop=512, kernel_size=3, pad_mode="zeros", wyrownanie="srodek"):
         super().__init__()
         if n_fft % hop or n_fft < hop:
             raise ValueError(f"n_fft ({n_fft}) musi być wielokrotnością hop ({hop})")
-        self.n_fft, self.hop = n_fft, hop
+        if wyrownanie not in ("koniec", "srodek"):
+            raise ValueError(f"wyrownanie: koniec albo srodek, nie {wyrownanie!r}")
+        self.n_fft, self.hop, self.wyrownanie = n_fft, hop, wyrownanie
         self.layer1 = CausalInputProjection(dim, hdim, kernel_size=kernel_size, pad_mode=pad_mode)
         self.act = nn.PReLU()
         self.out = nn.Conv1d(hdim, n_fft + 2, kernel_size=1)
@@ -84,8 +90,50 @@ class ISTFTHead(nn.Module):
         y = fold(ramki)
         obw = fold((self.window ** 2)[None, :, None].expand(1, self.n_fft, T))[0]      # suma okien^2
         y = y / obw.clamp(min=0.1)
-        start = (self.n_fft - self.hop) // 2                            # ramka k wyśrodkowana na swoim odcinku
+        start = self.n_fft - self.hop if self.wyrownanie == "koniec" else (self.n_fft - self.hop) // 2
         return y[:, start: start + T * self.hop]
+
+
+class STFTPostnet(nn.Module):
+    """Poprawka na wyjściu dekodera: widmo gotowego dźwięku (STFT n_fft, hop) razem z cechami ciała dekodera trafia
+    do kilku bloków ConvNeXt w czasie, które przewidują zespoloną maskę M = 1 + (a + i·b) na każdy prążek; dźwięk
+    wraca przez odwrotne STFT z nakładaniem ramek. Ostatnia warstwa startuje od zer (M = 1), więc na starcie
+    dekoder z tym modułem daje dokładnie to samo co bez niego.
+
+    Wejście sieci: widmo skompresowane |X|^0.3 z fazą (część rzeczywista i urojona) oraz cechy ciała dekodera
+    (wyrównane do ramek STFT). Moduł nie jest przyczynowy: patrzy num_layers · (ksz − 1) / 2 ramek w obie strony."""
+
+    def __init__(self, feat_dim=512, n_fft=2048, hop=512, dim=384, intermediate_dim=1152, num_layers=4, ksz=7,
+                 max_mask=4.0):
+        super().__init__()
+        self.n_fft, self.hop, self.max_mask = n_fft, hop, max_mask
+        nb = n_fft // 2 + 1
+        self.proj_in = nn.Conv1d(2 * nb + feat_dim, dim, kernel_size=1)
+        self.blocks = nn.ModuleList([ConvNeXtBlock(dim=dim, intermediate_dim=intermediate_dim, kernel_size=ksz)
+                                     for _ in range(num_layers)])
+        self.proj_out = nn.Conv1d(dim, 2 * nb, kernel_size=1)
+        nn.init.zeros_(self.proj_out.weight)
+        nn.init.zeros_(self.proj_out.bias)
+        self.register_buffer("window", torch.hann_window(n_fft), persistent=False)
+
+    def forward(self, y, feats):
+        """y: [B, N] dźwięk z głowicy; feats: [B, C, T] cechy ciała dekodera (N = T · hop)."""
+        n = y.shape[-1]
+        X = torch.stft(y.float(), self.n_fft, self.hop, window=self.window, center=True, return_complex=True)   # [B, nb, F]
+        F_ = X.shape[-1]
+        mag = X.abs()
+        komp = mag.clamp_min(1e-8) ** 0.3 * X / mag.clamp_min(1e-8)          # |X|^0.3 · e^{iφ}
+        f = feats.float()
+        if f.shape[-1] < F_:                                                   # F = T + 1 ramek (center=True)
+            f = torch.cat([f, f[..., -1:].expand(-1, -1, F_ - f.shape[-1])], dim=-1)
+        h = self.proj_in(torch.cat([komp.real, komp.imag, f[..., :F_]], dim=1))
+        for b in self.blocks:
+            h = b(h)
+        a, b_ = self.proj_out(h).chunk(2, dim=1)
+        maska = torch.complex(1.0 + a, b_)
+        modul = maska.abs()
+        maska = maska * (modul.clamp(max=self.max_mask) / modul.clamp_min(1e-8))   # ogranicza wzmocnienie
+        return torch.istft(X * maska, self.n_fft, self.hop, window=self.window, center=True, length=n)
 
 
 # Defaults based on configs/tts.json -> ae.decoder (the 1.5M decoder). The replicate variant: E12b and Supertonic-3.
@@ -137,6 +185,16 @@ class LatentDecoder1D(nn.Module):
 
         self.final_norm = FinalBatchNorm1d(dim)
 
+        pn = cfg.get('postnet')
+        self.postnet = None
+        if pn:
+            self.postnet = STFTPostnet(
+                feat_dim=dim, n_fft=int(pn.get('n_fft', 2048)), hop=int(cfg['head'].get('hop', cfg['head']['odim'])),
+                dim=int(pn.get('dim', 384)), intermediate_dim=int(pn.get('intermediate_dim', 1152)),
+                num_layers=int(pn.get('num_layers', 4)), ksz=int(pn.get('ksz', 7)),
+                max_mask=float(pn.get('max_mask', 4.0)),
+            )
+
         head_cfg = cfg['head']
         head_input_dim = int(head_cfg.get('idim', dim))
         if head_input_dim != dim:
@@ -152,6 +210,7 @@ class LatentDecoder1D(nn.Module):
                 hop=int(head_cfg.get('hop', head_cfg['odim'])),
                 kernel_size=int(head_cfg.get('ksz', 3)),
                 pad_mode=pad_mode,
+                wyrownanie=head_cfg.get('wyrownanie', 'srodek'),
             )
         else:
             self.head = VocoderHead(
@@ -233,6 +292,8 @@ class LatentDecoder1D(nn.Module):
 
         x = self.final_norm(x)
         waveform = self.head(x)
+        if self.postnet is not None:
+            waveform = self.postnet(waveform, x)
         return waveform
 
 

@@ -67,3 +67,4 @@ skryptu `combine_datasets.py` (fonemizacja espeak) ani treningu RL poza tym, co 
 - **`ocen_kodek_val.py`**: ocena kodeka na całych klipach walidacyjnych (recon, log-mel, LSD w pasmach), osobno dla każdego CSV.
 - **Kodek, dotrenowanie dekodera**: `--decoder_only` (enkoder zamrożony), `--init_ae`, `--init_disc`, `--hiband_hz`, `--hiband_floor`.
 - **Kodek, głowica w stylu Vocos**: `ISTFTHead` (widmo ramki 2048 + overlap-add, `ae.decoder.head.type = "istft"`), `--decoder_head`, `--head_warmup`; `--lr_warmup` także ze stałym tempem; skrypty budują dekoder według `ae_config` z punktu kontrolnego.
+- **Kodek, moduł poprawki**: `STFTPostnet` na wyjściu dekodera (maska widma od tożsamości, `ae.decoder.postnet`), `--decoder_postnet`; prawdziwe zamrażanie reszty dekodera przy `--head_warmup` z rampą `--body_ramp`; na jednej karcie bez DDP.

@@ -547,8 +547,15 @@ def main():
                         help='Głowica dekodera: patch (512 próbek na klatkę, sklejane) albo istft (widmo + overlap-add, jak Vocos). '
                              'Z --init_ae starego dekodera nowa głowica startuje od zera, reszta dekodera z wag')
     parser.add_argument('--istft_n_fft', type=int, default=2048, help='Długość ramki głowicy istft (wielokrotność 512)')
+    parser.add_argument('--decoder_postnet', action='store_true',
+                        help='Moduł poprawki na wyjściu dekodera (STFTPostnet: maska widma, start od tożsamości); '
+                             'z --head_warmup i --head_lr_scale „nową częścią” jest ten moduł, a nie głowica')
+    parser.add_argument('--postnet_dim', type=int, default=384)
+    parser.add_argument('--postnet_layers', type=int, default=4)
     parser.add_argument('--head_warmup', type=int, default=0,
                         help='Przez pierwsze N kroków uczy się tylko głowica dekodera (reszta dekodera stoi), potem cały dekoder')
+    parser.add_argument('--body_ramp', type=int, default=1000,
+                        help='Po --head_warmup tempo ciała dekodera rośnie liniowo od zera przez N kroków (świeże momenty Adama)')
     parser.add_argument('--head_lr_scale', type=float, default=1.0,
                         help='Z --decoder_only i --constant_lr: tempo głowicy dekodera = --lr × ta wartość (nowa głowica od zera)')
     parser.add_argument('--d_warmup', type=int, default=0, help='Discriminators frozen, reconstruction-only loss for the first N steps')
@@ -636,9 +643,14 @@ def main():
     decoder_cfg = dict(ae_cfg['decoder'])
     if args.decoder_pad_mode: decoder_cfg['pad_mode'] = args.decoder_pad_mode
     if args.decoder_head == 'istft':
-        decoder_cfg['head'] = {**decoder_cfg['head'], 'type': 'istft', 'n_fft': args.istft_n_fft, 'hop': HOP}
+        decoder_cfg['head'] = {**decoder_cfg['head'], 'type': 'istft', 'n_fft': args.istft_n_fft, 'hop': HOP, 'wyrownanie': 'srodek'}
     elif args.decoder_head == 'patch':
         decoder_cfg['head'] = {k: v for k, v in decoder_cfg['head'].items() if k not in ('type', 'n_fft', 'hop')}
+    if args.decoder_postnet:
+        decoder_cfg['postnet'] = {'dim': args.postnet_dim, 'intermediate_dim': 3 * args.postnet_dim,
+                                  'num_layers': args.postnet_layers, 'ksz': 7, 'n_fft': 2048}
+    # część dekodera uczona od nowa (--head_warmup zamraża resztę, --head_lr_scale mnoży jej tempo)
+    nowa_czesc = 'postnet.' if decoder_cfg.get('postnet') else 'head.'
     ae_cfg = {**ae_cfg, 'decoder': decoder_cfg}   # zapisywane w punktach kontrolnych: dalsze skrypty budują ten sam dekoder
     if args.head_warmup and not args.decoder_only: raise SystemExit("--head_warmup tylko z --decoder_only")
     ckpt = torch.load(args.resume, map_location='cpu') if args.resume else None
@@ -670,8 +682,11 @@ def main():
     if train_cfg.get('sync_bn', False) and dist.get_world_size() > 1 and not args.decoder_only:
         # per-GPU statistics over a small batch can collapse the encoder stem
         encoder = nn.SyncBatchNorm.convert_sync_batchnorm(encoder)
-    if args.avg_every > 0:
+    if args.head_warmup and dist.get_world_size() > 1 and args.avg_every == 0:
+        raise SystemExit("--head_warmup na kilku kartach wymaga --avg_every (zamrażanie wag nie działa pod DDP)")
+    if args.avg_every > 0 or (args.decoder_only and dist.get_world_size() == 1):
         # Bez DDP: każda karta trenuje własną kopię i nie przesyła gradientów co krok; kopie są uśredniane co N kroków.
+        # Na jednej karcie DDP nic nie daje, a bez niego krok generatora nie liczy gradientów dyskryminatorów.
         mpd = MultiPeriodDiscriminator().to(device)
         mrd = MultiResolutionDiscriminator().to(device)
     else:
@@ -690,9 +705,9 @@ def main():
     enc_named = list(_mod(encoder).named_parameters())
     if args.decoder_only:
         _dec = list(_mod(decoder).named_parameters())
-        _cialo = param_groups([(n, p) for n, p in _dec if not n.startswith('head.')], lr, no_decay_norms)
+        _cialo = param_groups([(n, p) for n, p in _dec if not n.startswith(nowa_czesc)], lr, no_decay_norms)
         for g in _cialo: g['cialo_dekodera'] = True   # --head_warmup: tempo 0 przez pierwsze kroki
-        _glowica = param_groups([(n, p) for n, p in _dec if n.startswith('head.')], lr, no_decay_norms)
+        _glowica = param_groups([(n, p) for n, p in _dec if n.startswith(nowa_czesc)], lr, no_decay_norms)
         for g in _glowica: g['glowica_dekodera'] = True     # --head_lr_scale
         g_groups = _cialo + _glowica
     elif args.encoder_only or args.stage2: g_groups = param_groups(enc_named, lr, no_decay_norms)
@@ -715,8 +730,9 @@ def main():
         _ae = torch.load(args.init_ae, map_location=device)
         _mod(encoder).load_state_dict({k.replace('module.', ''): v for k, v in _ae['encoder'].items()}, strict=True)
         _sd = {k.replace('module.', ''): v for k, v in _ae['decoder'].items()}
-        _glowica_stara = _ae.get('ae_config', {}).get('decoder', {}).get('head', {}).get('type', 'patch')
-        _glowica_nowa = decoder_cfg['head'].get('type', 'patch')
+        _dek_stary = _ae.get('ae_config', {}).get('decoder', {})
+        _glowica_stara = _dek_stary.get('head', {}).get('type', 'patch') + (' + postnet' if _dek_stary.get('postnet') else '')
+        _glowica_nowa = decoder_cfg['head'].get('type', 'patch') + (' + postnet' if decoder_cfg.get('postnet') else '')
         if _glowica_stara == _glowica_nowa:
             _mod(decoder).load_state_dict(_sd, strict=True)
         else:
@@ -760,9 +776,9 @@ def main():
         if args.local_rank == 0 and args.decoder_only:
             _opis = {}
             for g in opt_g.param_groups:
-                _opis["głowica" if g.get('glowica_dekodera') else "ciało dekodera"] = g['initial_lr']
+                _opis[f"nowa część ({nowa_czesc.rstrip('.')})" if g.get('glowica_dekodera') else "reszta dekodera"] = g['initial_lr']
             logger.info("Tempo docelowe: " + ", ".join(f"{k} {v:g}" for k, v in _opis.items())
-                        + (f"; ciało stoi przez pierwsze {args.head_warmup} kroków" if args.head_warmup else ""))
+                        + (f"; reszta dekodera stoi przez pierwsze {args.head_warmup} kroków" if args.head_warmup else ""))
     if lr_schedule == 'plateau':
         dec_from = ckpt.get('dec_trainable_from', step) if args.stage2 else None   # the decoder lr ramps from here
         for i, g in enumerate(opt_g.param_groups):
@@ -842,6 +858,7 @@ def main():
         sync_weights(avg_modules, from_rank0=True)   # ten sam punkt startu na każdej karcie
         logger.info(f"Uśrednianie wag co {args.avg_every} kroków na {dist.get_world_size()} kartach (bez synchronizacji gradientów)")
 
+    cialo_zamrozone = [False]   # stan zamrożenia ciała dekodera przy --head_warmup (ustawiany w pętli)
     prof = Prof(device) if args.profile > 0 and args.local_rank == 0 else None
     if prof: prof.start()
 
@@ -851,10 +868,24 @@ def main():
         for batch in pbar:
             if step >= args.total_steps: break
             if lr_schedule == 'plateau': lr_sched.step(step)
-            if args.head_warmup and step < args.head_warmup:   # potem tempo ustawia znowu harmonogram (krok po kroku)
-                for g in opt_g.param_groups:
-                    if g.get('cialo_dekodera'): g['lr'] = 0.0
-                if step == args.head_warmup and args.local_rank == 0: logger.info(f"Krok {step}: cały dekoder w treningu")
+            if args.head_warmup:
+                # Ciało dekodera naprawdę zamrożone (bez gradientów, więc bez przejścia wstecz przez nie) do kroku
+                # --head_warmup, potem odmrożone z tempem rosnącym liniowo przez --body_ramp kroków.
+                zamrozone = step < args.head_warmup
+                if zamrozone != cialo_zamrozone[0]:
+                    for n, p in _mod(decoder).named_parameters():
+                        if not n.startswith(nowa_czesc): p.requires_grad_(not zamrozone)
+                    cialo_zamrozone[0] = zamrozone
+                    if args.local_rank == 0:
+                        logger.info(f"Krok {step}: " + (f"reszta dekodera zamrożona, uczy się sama nowa część ({nowa_czesc.rstrip('.')})" if zamrozone else
+                                                        f"cały dekoder w treningu (tempo reszty rośnie przez {args.body_ramp} kroków)"))
+                if zamrozone:   # statystyki BatchNorm zamrożonej części też stoją (set_train_modes włącza tryb train)
+                    for n, m in _mod(decoder).named_modules():
+                        if isinstance(m, nn.modules.batchnorm._BatchNorm) and not n.startswith(nowa_czesc): m.eval()
+                if not zamrozone and step < args.head_warmup + args.body_ramp:
+                    for g in opt_g.param_groups:
+                        if g.get('cialo_dekodera'):
+                            g['lr'] = g.get('initial_lr', lr) * (step - args.head_warmup + 1) / max(1, args.body_ramp)
             result = train_step(batch, encoder, decoder, mpd, mrd, mel_transform_input, mel_transforms_loss, opt_g, opt_d, device, crop_len, logger,
                                 update_discriminator=(step > args.d_warmup), recon_only=(0 < args.d_warmup and step <= args.d_warmup),
                                 recon_full_segment=(recon != 'linmel_12k'),
