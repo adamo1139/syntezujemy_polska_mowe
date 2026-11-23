@@ -106,13 +106,14 @@ def krok_asr_na_kartach(args) -> None:
     if nieudane:
         sys.exit(f"Procesy na kartach {', '.join(nieudane)} skończyły się błędem — zobacz logi w {praca}. "
                  "To samo polecenie wznowi pracę.")
+    zrobione = sum(sum(1 for _ in f.open(encoding="utf-8")) for f in praca.glob("asr_*_z_*.jsonl"))
+    print(f"Transkrypcji razem: {zrobione} z {len(wczytaj_manifest(Path(args.katalog)))} klipów.")
     print(f"Gotowe. Dalej: python {Path(__file__).relative_to(KATALOG_PROJEKTU)} ocen {args.katalog}")
 
 
 def krok_asr(args) -> None:
     if args.karty:
         return krok_asr_na_kartach(args)
-    import moondream as md
 
     katalog = Path(args.katalog)
     praca = Path(args.praca or katalog / "asr")
@@ -121,8 +122,13 @@ def krok_asr(args) -> None:
     wyjscie = praca / f"asr_{k}_z_{n}.jsonl"
     gotowe = gotowe_id(wyjscie)
     klipy = [w for w in wczytaj_manifest(katalog) if czesc_klipu(w["id"], n) == k and w["id"] not in gotowe]
+    if klipy and not (katalog / klipy[0]["audio"]).is_file():
+        sys.exit(f"Nie ma pliku audio {katalog / klipy[0]['audio']} — manifest jest, ale nagrań w {katalog} brak. "
+                 "Jeśli klipy leżą w dane/audio, podaj katalog dane (z metadane.jsonl) i --praca.")
     if args.limit:
         klipy = klipy[: args.limit]
+    import moondream as md
+
     print(f"część {k}/{n}: {len(klipy)} klipów do zrobienia ({len(gotowe)} gotowych) -> {wyjscie}", flush=True)
     if not klipy:
         return
@@ -149,6 +155,8 @@ def krok_asr(args) -> None:
                     tempo = zrobione / (time.time() - t0)
                     print(f"  {zrobione}/{len(klipy)}  {tempo:.1f} klipów/s  błędów {bledy}", flush=True)
     print(f"część {k}/{n}: gotowe {zrobione}, błędów {bledy}, {time.time() - t0:.0f} s", flush=True)
+    if bledy > max(10, zrobione):  # większość klipów się nie udała: to nie pojedyncze złe pliki
+        sys.exit(f"część {k}/{n}: {bledy} błędów na {zrobione} transkrypcji — coś jest nie tak (patrz błędy wyżej)")
 
 
 # ------------------------------------------------------------------------------------------------ porównanie
@@ -246,6 +254,9 @@ def krok_ocen(args) -> None:
           + (" (idą do usun.txt: --usun-bez-asr)" if args.usun_bez_asr else " (nie są oceniane ani usuwane)"))
     if not klipy:
         sys.exit("Brak transkrypcji: najpierw krok asr.")
+    if args.usun_bez_asr and len(bez_asr) > 0.05 * len(klipy):
+        sys.exit(f"{len(bez_asr)} klipów bez transkrypcji to ponad 5% zbioru — wygląda na niedokończony krok asr, "
+                 "a nie na pojedyncze złe pliki. Dokończ asr albo pomiń --usun-bez-asr.")
 
     oceny = []
     for w in klipy:
