@@ -9,7 +9,7 @@ tags:
 - autoencoder
 - text-to-speech
 datasets:
-- HoldForQuake/VoxCPM2-pol-one-voice-367h
+- RockTheBoat/VoxCPM2-pol-one-voice-367h
 ---
 
 # MikołAI: kodek mowy 48 kHz (autoenkoder) dla polskiego TTS, jeden głos
@@ -42,7 +42,7 @@ Próbkowanie 48 kHz, mono, krok 512 próbek.
 
 ## Trening
 
-- **Dane:** [HoldForQuake/VoxCPM2-pol-one-voice-367h](https://huggingface.co/datasets/HoldForQuake/VoxCPM2-pol-one-voice-367h),
+- **Dane:** [RockTheBoat/VoxCPM2-pol-one-voice-367h](https://huggingface.co/datasets/RockTheBoat/VoxCPM2-pol-one-voice-367h),
   ok. 364 h w treningu; 300 całych rozmów (1488 klipów) odłożonych do walidacji. Bez filtra jakości.
 - **Straty:** przepis domyślny blue-codec (rekonstrukcja melowa do 12 kHz, dyskryminatory wielookresowe
   i wielorozdzielcze, dopasowanie cech) plus składnik górnego pasma (`--hiband_w 2.0`).

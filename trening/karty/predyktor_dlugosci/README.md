@@ -6,7 +6,7 @@ tags:
 - text-to-speech
 - duration-predictor
 datasets:
-- HoldForQuake/VoxCPM2-pol-one-voice-367h
+- RockTheBoat/VoxCPM2-pol-one-voice-367h
 ---
 
 # MikołAI: predyktor długości wypowiedzi dla polskiego TTS, jeden głos
@@ -29,7 +29,7 @@ Latenty pochodzą z kodeka [RockTheBoat/MikolAI-kodek-checkpoints](https://huggi
 
 ## Trening
 
-- Dane: [HoldForQuake/VoxCPM2-pol-one-voice-367h](https://huggingface.co/datasets/HoldForQuake/VoxCPM2-pol-one-voice-367h),
+- Dane: [RockTheBoat/VoxCPM2-pol-one-voice-367h](https://huggingface.co/datasets/RockTheBoat/VoxCPM2-pol-one-voice-367h),
   ok. 148 tys. klipów do 30 s; 300 całych rozmów odłożonych do walidacji. Bez filtra jakości.
 - Cel: logarytm łącznej długości klipu, strata L1. Wycinek wzorcowy: losowe 5–95% latentów tego samego klipu.
 - AdamW, tempo 1e-4 stałe, 6000 kroków, partia 16 na kartę × 6 kart (DDP).

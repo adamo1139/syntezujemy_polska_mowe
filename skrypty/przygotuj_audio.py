@@ -27,7 +27,7 @@ nie mogą występować w żadnym innym podziale.
 
 Przykłady:
   python skrypty/przygotuj_audio.py
-  python skrypty/przygotuj_audio.py --repo HoldForQuake/VoxCPM2-pol-one-voice-367h
+  python skrypty/przygotuj_audio.py --repo RockTheBoat/VoxCPM2-pol-one-voice-367h
   python skrypty/przygotuj_audio.py --dodaj wyniki/poziomka_liczby
   python skrypty/przygotuj_audio.py --dodaj-val liczby=wyniki/poziomka_val_liczby
 """

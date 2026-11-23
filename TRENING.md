@@ -29,7 +29,7 @@ deactivate
 
 - Jeśli pliki po syntezie nadal leżą w `wyniki/poziomka/audio/`, skrypt używa ich w miejscu. Jeśli zostały
   usunięte, wypakowuje klipy z `wyniki/poziomka_parquet/data/` do `dane/audio/` (ok. 61 GB, wznawialne).
-  Bez lokalnego parquet: `--repo HoldForQuake/VoxCPM2-pol-one-voice-367h`.
+  Bez lokalnego parquet: `--repo RockTheBoat/VoxCPM2-pol-one-voice-367h`.
 - Walidacja to 300 całych rozmów (`--rozmow-val`), wybranych stale po skrócie `zrodlo_id`.
 - Wynik w `dane/`: `metadane.jsonl`, `kodek_train.txt`, `kodek_val.txt`, `bluetts_train.csv`,
   `bluetts_val.csv`, `polski_100m.json` (konfiguracja z wpisanymi ścieżkami).
@@ -415,7 +415,7 @@ do tekstu — oryginał VoxCPM2 0,972, rekonstrukcja starym dekoderem 0,970, z m
 modelem 115k 0,979. Kodek niczego nie psuje; błędy są już w nagraniach VoxCPM2 („20 tys. zł” → „20 Tysu Dzeko”,
 „1,5 godziny” → „7 godziny”, „np. do 1 kV” → bełkot). Wyjście: zamiana liczb na słowa przed syntezą.
 
-## 8. Postfiltr COSE (jednokrokowy, generatywny) — eksperyment
+## 8. Postfiltr COSE (jednokrokowy, generatywny) — eksperyment, porzucony (2026-11-23)
 
 Kod w `cose/` (kopia ICDM-UESTC/COSE z poprawkami; **repo autorów nie ma licencji — kod oznaczony jako UNLICENSED**,
 szczegóły w `cose/README.md`). Postfiltr uczy się zamieniać wyjście naszego dekodera w nagranie VoxCPM2 w jednym
@@ -434,3 +434,21 @@ CUDA_VISIBLE_DEVICES=4 python train.py --backbone ncsnpp --nf 128 --attn_resolut
   --sr 48000 --n_fft 1534 --hop_length 384 --num_frames 256 --batch_size 4 --num_workers 6 \
   --loss_type mean_flow --num_eval_files 20 --max_epochs 100 --save_ckpt_interval 5000
 ```
+
+**Wynik: porzucony.** Po 1 epoce (ok. 6000 kroków, partia 2, ok. 67 min na GPU 4) na 100 parach walidacyjnych
+(`ocen_cose.py`, 1 krok, wagi EMA):
+
+| | UTMOS | PESQ | ESTOI | SI-SDR | LSD 16–24 kHz |
+|---|---|---|---|---|---|
+| oryginał VoxCPM2 | 2,965 | | | | |
+| sam kodek | 2,702 | 3,225 | 0,920 | −30,4 | 12,2 |
+| kodek + COSE | 1,226 | 1,084 | 0,521 | −41,2 | 48,6 |
+
+Wyjście COSE to mowa cichsza o ok. 6 dB z głośnym szumem szerokopasmowym (pasmo 12–24 kHz o ok. 15 dB nad oryginałem).
+Przyczyna jest w samych parach, nie w długości treningu: kodek nie zachowuje fazy oryginału (enkoder widzi tylko mel,
+fazę tworzy dekoder z dyskryminatorami). Spójność fazy kodek–oryginał to ok. 0,1–0,2 we wszystkich pasmach, bez stałego
+opóźnienia; stąd SI-SDR −30 dB przy PESQ 3,2. COSE przewiduje złożone widmo z założeniem, że faza wejścia mówi coś
+o fazie celu — tu nie mówi, więc jeden krok uśrednia fazy do zera. Autorzy nie wydali też wag, więc nie było jak
+sprawdzić, ile metoda daje nawet na ich danych. Niesprawdzone pomysły: cel ze spójną fazą (moduł oryginału + faza
+kodeka) i wiele kroków; zamiast tego poprawiamy dekoder, a barwę EQ (sekcja 7).
+
