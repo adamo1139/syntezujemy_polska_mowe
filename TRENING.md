@@ -485,6 +485,27 @@ do tekstu — oryginał VoxCPM2 0,972, rekonstrukcja starym dekoderem 0,970, z m
 modelem 115k 0,979. Kodek niczego nie psuje; błędy są już w nagraniach VoxCPM2 („20 tys. zł” → „20 Tysu Dzeko”,
 „1,5 godziny” → „7 godziny”, „np. do 1 kV” → bełkot). Wyjście: zamiana liczb na słowa przed syntezą.
 
+**Dekoder z odmrożonym ciałem (2026-11-23/24).** Kolejne kroki na module poprawki 12 bloków (`--postnet_layers 12`,
+12,5M): sam moduł przy zamrożonym ciele stanął na UTMOS val 2,759 (jak 4 bloki: 2,755), więc dalej:
+dyskryminator SLM (zamrożony WavLM-Base+, `--slm_w 1 --slm_fm_w 5`), segment 2,8 s (`--segment_sec 2.8`,
+porcja 24), wycinek dla MPD/MRD 1 s (`--d_crop 1.0`), odmrożony cały dekoder (od kroku 6000) i od kroku 19000
+strata modulacji obwiedni (`--modulacja_w 5`: „schodki szumu”, modulacja szumu 4–16 kHz w rytmie klatek głowicy
+k·93,75 Hz; w syntezie dekodery miały 7–14 dB ponad tło przy oryginale 2–5 dB). Na odłożonych klipach (oryginały
+3,020): sam moduł z SLM 2,790, odmrożony dekoder 2,847 po 4000 kroków, z modulacją 2,86–2,895; modulacja 0,145 →
+0,10, prążki 0,197 → 0,177. Wynik `kodek_48k_postnet12_slm_dlugie/ae_wsm_26_29.pt` na pełnej walidacji (lista po
+filtrze ASR):
+
+| dekoder | UTMOS val | brak do oryg. | UTMOS val_liczby | brak do oryg. | log-mel | LSD 16–24 kHz |
+|---|---|---|---|---|---|---|
+| stary | 2,739 | 0,257 | 2,624 | 0,234 | 0,586 | 24,82 |
+| moduł 4 bloki | 2,755 | 0,241 | 2,643 | 0,215 | 0,381 | 12,04 |
+| moduł 12 bloków, zamrożone ciało | 2,759 | 0,237 | 2,645 | 0,213 | 0,378 | 11,89 |
+| **odmrożony + SLM + 2,8 s + modulacja (WSM 26–29k)** | **2,880** | **0,119** | **2,763** | **0,095** | **0,367** | 11,95 |
+
+(Wcześniejsze wiersze na liście walidacyjnej sprzed czyszczenia; oryginał val 2,996 → 2,999.) W syntezie
+(EMA 225k, CFG 4/16, 24 zdania) punkt 16k bez straty modulacji: UTMOS 3,108 wobec 3,001 (moduł 4 bloki).
+Dalej: dekoder v2 (przednia sieć 15,6 Hz + `gelu_snake`) od tego WSM.
+
 **UTMOS łańcucha z Sidonem** (`trening/ocen_sidon.py`, 100 par walidacyjnych, kodek z modułem poprawki
 `ae_wsm_6_9.pt`; EQ = `trening/korektor_sidona_db.npy`):
 
