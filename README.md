@@ -63,9 +63,10 @@ zamiast synchronizacji gradientów) i komputerze z RTX 5080 do odsłuchów i tes
 
 ## Licencje
 
-- **Kod w `trening/`** — pochodzi z [BlueTTS](https://github.com/maxmelichov/BlueTTS) i
-  [blue-codec](https://github.com/maxmelichov/blue-codec) (MIT, `trening/LICENSE-BlueTTS`,
-  `trening/LICENSE-blue-codec`).
+- **Nasz kod** (`skrypty/`, `liczby/`, nasze pliki i zmiany w `trening/`) — Apache 2.0 (`LICENSE`).
+- **Kod w `trening/` skopiowany z BlueTTS i blue-codec** — [BlueTTS](https://github.com/maxmelichov/BlueTTS) i
+  [blue-codec](https://github.com/maxmelichov/blue-codec), MIT (`trening/LICENSE-BlueTTS`,
+  `trening/LICENSE-blue-codec`); te pliki zachowują swoje noty MIT, nasze zmiany w nich są na Apache 2.0.
 - **`cose/`** — kod autorów COSE bez licencji (UNLICENSED), tylko do eksperymentu.
 - **Wagi MikołAI** — OpenMDW 1.1 (w repo modelu na HF).
 - **Dane** — synteza VoxCPM2 (Apache 2.0) z tekstów `polskie-sprawy-v8-jakosc50`; licencje zbiorów podane
