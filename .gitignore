@@ -8,3 +8,6 @@ modele/
 trening/.venv/
 liczby/teksty_hf.*
 liczby/teksty_slowne.jsonl
+
+# nagrania z benchmarku (duże; próbki do README trafiają osobno)
+probki/benchmark/wyniki/
