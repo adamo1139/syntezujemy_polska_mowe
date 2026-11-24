@@ -7,7 +7,7 @@ uczy się go naśladować i działa szybciej niż w czasie rzeczywistym na zwyk�
 
 | | |
 |---|---|
-| **Model** | [cpral/MikolAI-109M-1-Polski-TTS](https://huggingface.co/cpral/MikolAI-109M-1-Polski-TTS) — ok. 109M parametrów, 48 kHz, jeden głos |
+| **Model** | [cpral/MikolAI-109M-v0.1-Polish-TTS-Preview](https://huggingface.co/cpral/MikolAI-109M-v0.1-Polish-TTS-Preview) — ok. 109M parametrów, 48 kHz, jeden głos |
 | **Biblioteka** | [adamo1139/mikolai](https://github.com/adamo1139/mikolai) — `pip install "git+https://github.com/adamo1139/mikolai"` |
 | **Dane** | [RockTheBoat/VoxCPM2-pol-one-voice-367h](https://huggingface.co/datasets/RockTheBoat/VoxCPM2-pol-one-voice-367h) (367 h) oraz zbiory z liczbami, datami i matematyką |
 | **Teksty źródłowe** | [cpral/polskie-sprawy-v8-jakosc50](https://huggingface.co/datasets/cpral/polskie-sprawy-v8-jakosc50) |
@@ -17,7 +17,7 @@ from mikolai import MikolAI
 
 tts = MikolAI.from_pretrained()
 tts.zapisz("Dzień Dobry, umawiała się Pani na strzyżenie włosów u nas na jutro, czy Pani wizyta jest aktualna?",
-           "wizyta.wav")
+           "wizyta.ogg")
 ```
 
 ## Jak to działa

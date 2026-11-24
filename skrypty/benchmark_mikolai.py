@@ -9,7 +9,7 @@ Na jednym rdzeniu CPU (taskset przypina proces do rdzenia 0, --watki 1 ustawia j
 Na GPU:
   python skrypty/benchmark_mikolai.py --device cuda --partia 64 --wyjscie probki/benchmark/wyniki/mikolai_gpu
 
-Wyniki: <wyjscie>/<nazwa>.wav (48 kHz) i <wyjscie>/wyniki.json (czas, długość nagrania, RTF, sprzęt, ustawienia).
+Wyniki: <wyjscie>/<nazwa>.ogg|opus|wav|flac (48 kHz; --format) i <wyjscie>/wyniki.json (czas, długość nagrania, RTF, sprzęt, ustawienia).
 Wymaga biblioteki mikolai (github.com/adamo1139/mikolai) i soundfile.
 """
 
@@ -38,13 +38,15 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--teksty", default="probki/benchmark", help="katalog z plikami .txt")
     p.add_argument("--wyjscie", required=True)
-    p.add_argument("--repo", default=None, help="repo HF albo katalog z wagami (domyślnie cpral/MikolAI-109M-1-Polski-TTS)")
+    p.add_argument("--repo", default=None, help="repo HF albo katalog z wagami (domyślnie cpral/MikolAI-109M-v0.1-Polish-TTS-Preview)")
     p.add_argument("--device", default="cpu")
     p.add_argument("--watki", type=int, default=None, help="wątki PyTorch (1 = jeden rdzeń; razem z taskset -c 0)")
     p.add_argument("--partia", type=int, default=64)
     p.add_argument("--cfg", type=float, default=4.0)
     p.add_argument("--kroki", type=int, default=16)
     p.add_argument("--ziarno", type=int, default=0)
+    p.add_argument("--format", choices=["ogg", "opus", "wav", "flac"], default="ogg", help="format nagrań (ogg/opus = Opus, skompresowany)")
+    p.add_argument("--kbps", type=int, default=64, help="przepływność Opus w kbit/s")
     p.add_argument("--pliki", nargs="*", default=None, help="tylko te nazwy plików (bez .txt)")
     a = p.parse_args()
 
@@ -57,7 +59,7 @@ def main() -> None:
     if a.watki:
         torch.set_num_threads(a.watki)
         torch.set_num_interop_threads(1)
-    from mikolai import DOMYSLNE_REPO, MikolAI, podziel, sklej
+    from mikolai import DOMYSLNE_REPO, MikolAI, podziel, sklej, zapisz_audio
     try:
         from tqdm import tqdm
     except ImportError:
@@ -110,7 +112,7 @@ def main() -> None:
         audio = sklej(nagrania, [k for _, k in podzial], sr).clamp(-1, 1).float().cpu().numpy()
         czas = time.time() - start
         dl = len(audio) / sr
-        sf.write(os.path.join(a.wyjscie, f"{nazwa}.wav"), audio, sr)
+        zapisz_audio(audio, os.path.join(a.wyjscie, f"{nazwa}.{a.format}"), sr, a.kbps)
         wyniki["pliki"][nazwa] = {"znakow": len(tekst), "kawalkow": len(kawalki), "sekund_audio": round(dl, 2),
                                   "sekund_liczenia": round(czas, 2), "rtf": round(czas / dl, 4),
                                   "x_czasu_rzeczywistego": round(dl / czas, 2)}

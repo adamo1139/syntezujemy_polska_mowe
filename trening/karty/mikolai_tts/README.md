@@ -19,7 +19,9 @@ datasets:
 - RockTheBoat/VoxCPM2-pol-one-voice-liczby
 ---
 
-# MikołAI 109M v1
+> Ten README i szczegóły implememtacyjne są WIP
+
+# MikołAI 109M 0.1
 
 **MikołAI** to mały model zamiany tekstu na mowę dla języka polskiego: ok. 109M parametrów, dźwięk 48 kHz,
 jeden głos. Czyta surowy polski tekst (bez fonemów i bez zewnętrznego G2P) i działa szybciej niż w czasie
