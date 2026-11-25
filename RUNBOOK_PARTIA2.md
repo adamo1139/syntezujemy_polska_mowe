@@ -141,8 +141,15 @@ z opisem filtra (`wyslij_na_hf.py --usun`, jak przy zbiorach `-czyste`):
 
 ```bash
 python skrypty/wyslij_na_hf.py --wyniki wyniki/partia2 --usun wyniki/partia2/utmos/usun_razem.txt \
-  --repo RockTheBoat/VoxCPM2-pol-one-voice-partia2-czyste
+  --repo RockTheBoat/VoxCPM2-pol-one-voice-partia2-czyste \
+  --opis-filtra trening/karty/partia2/filtr.md \
+  --wybor-tekstow "wszystkie rozmowy ze zbioru (bez dodatkowego progu jakości) poza tymi, które weszły do [VoxCPM2-pol-one-voice-367h](https://huggingface.co/datasets/RockTheBoat/VoxCPM2-pol-one-voice-367h) i zbioru z liczbami"
 ```
+
+- Karta: opis obu filtrów z `trening/karty/partia2/filtr.md` (ASR 15%, UTMOS < 2,75, przesunięcie w stronę krótkich
+  klipów); liczba usuniętych klipów wstawia się sama, razem z tymi, które `na_opus.py --pomin` przeniósł już do
+  `manifest.odrzucone.jsonl`. Godziny, długości klipów i tematy liczone z danych przy pakowaniu.
+- `--tylko-pakuj` najpierw, żeby przejrzeć `wyniki/partia2_parquet/README.md` przed wysyłką.
 
 Po dołożeniu danych latenty trzeba policzyć na nowo dla nowych klipów (`trening/policz_latenty.py`,
 `TRENING.md`, sekcja 6c), zanim ruszy dalszy trening modelu tekst→latenty.

@@ -137,9 +137,13 @@ def zapisz_plik(sciezka: Path, wpisy: list[dict], schemat_pa, KOLUMNY: list[tupl
     tymczasowy.rename(sciezka)
 
 
-def karta(repo: str, wiersze: list[dict], czestotliwosc: int, zrodlo_tekstow: str, usuniete: int = 0) -> str:
+def karta(repo: str, wiersze: list[dict], czestotliwosc: int, zrodlo_tekstow: str, usuniete: int = 0,
+          opis_filtra: str | None = None, wybor_tekstow: str = "górne 10% według\n  `jakosc.ocena`") -> str:
     format_audio = "Ogg Opus" if str(wiersze[0]["_sciezka"]).endswith(".ogg") else "FLAC"
-    if usuniete:
+    if opis_filtra:   # własny opis z pliku (--opis-filtra); {usuniete}, {procent}, {godziny_usuniete} wstawiane tu
+        opis_filtra = opis_filtra.strip().format(
+            usuniete=usuniete, procent=f"{100 * usuniete / (usuniete + len(wiersze)):.0f}")
+    elif usuniete:
         opis_filtra = (
             f"**Zbiór po filtrze ASR.** Usunięto {usuniete} klipów ({100 * usuniete / (usuniete + len(wiersze)):.0f}%) "
             "o najwyższym błędzie znakowym między tekstem a transkrypcją "
@@ -205,8 +209,7 @@ Zbiór powstał do trenowania małych polskich modeli TTS (destylacja z VoxCPM2)
   CFG {", ".join(cfg)}, kroki dyfuzji: {", ".join(kroki)}.
 - **Głos:** {", ".join(glosy)} (tryb: {", ".join(tryby)}), jedno nagranie wzorcowe dla wszystkich klipów.
   Głos jest syntetyczny (wylosowany przez VoxCPM2), nie należy do żadnej osoby.
-- **Teksty:** {zrodlo_tekstow}: rozmowy bez udziału modelu `private`, górne 10% według
-  `jakosc.ocena`, oczyszczone z markdownu i pocięte na fragmenty z całych zdań. {opis_liczb}
+- **Teksty:** {zrodlo_tekstow}: rozmowy bez udziału modelu `private`, {wybor_tekstow}, oczyszczone z markdownu i pocięte na fragmenty z całych zdań. {opis_liczb}
   {rozmowy} rozmów źródłowych; {pytania:.0f}% klipów to pytania użytkownika,
   reszta to fragmenty odpowiedzi asystenta.
 - **Kod:** https://github.com/adamo1139/syntezujemy_polska_mowe
@@ -296,6 +299,10 @@ def main() -> None:
                    help="plik z id klipów do pominięcia (usun.txt z czysc_asr.py): wysyłka zbioru po filtrze")
     p.add_argument("--mb-na-plik", type=int, default=500)
     p.add_argument("--zrodlo-tekstow", default="[cpral/polskie-sprawy-v8-jakosc50](https://huggingface.co/datasets/cpral/polskie-sprawy-v8-jakosc50)")
+    p.add_argument("--opis-filtra", help="plik markdown z opisem filtra do karty (zamiast domyślnego zdania o ASR); "
+                   "{usuniete} i {procent} są wstawiane")
+    p.add_argument("--wybor-tekstow", default="górne 10% według\n  `jakosc.ocena`",
+                   help="do karty: które rozmowy wybrano ze źródła tekstów")
     p.add_argument("--plikow-na-commit", type=int, default=10, help="ile plików parquet w jednej partii wysyłki (jeden commit)")
     p.add_argument("--publiczne", action="store_true", help="utwórz repo jako publiczne (domyślnie prywatne)")
     p.add_argument("--tylko-pakuj", action="store_true", help="zapisz parquet i README, nic nie wysyłaj")
@@ -318,6 +325,11 @@ def main() -> None:
         t0 = time.time()
         wiersze = wczytaj_manifest(wyniki)
         wszystkich = len(wiersze)
+        odrzucone_wczesniej = wyniki / "manifest.odrzucone.jsonl"   # klipy usunięte już przez na_opus.py --pomin
+        if odrzucone_wczesniej.is_file():
+            ile = sum(1 for w in odrzucone_wczesniej.open(encoding="utf-8") if w.strip())
+            wszystkich += ile
+            print(f"{ile} klipów usuniętych wcześniej (manifest.odrzucone.jsonl) liczę do odfiltrowanych w karcie")
         if args.usun:
             do_usuniecia = {w.strip() for plik in args.usun for w in Path(plik).read_text(encoding="utf-8").splitlines() if w.strip()}
             wiersze = [w for w in wiersze if w["id"] not in do_usuniecia]
@@ -346,7 +358,8 @@ def main() -> None:
             zapisz_plik(nazwa, wpisy, schemat_pa, kol)
             if nr % 10 == 0 or nr == len(do_zapisu):
                 print(f"  zapisano {nr}/{len(do_zapisu)} plików  [{time.time() - t0:.0f} s]", flush=True)
-        (paczki / "README.md").write_text(karta(args.repo, wiersze, czestotliwosc, args.zrodlo_tekstow, wszystkich - len(wiersze)), encoding="utf-8")
+        (paczki / "README.md").write_text(karta(args.repo, wiersze, czestotliwosc, args.zrodlo_tekstow, wszystkich - len(wiersze),
+            Path(args.opis_filtra).read_text(encoding="utf-8") if args.opis_filtra else None, args.wybor_tekstow), encoding="utf-8")
         print(f"Karta datasetu: {paczki / 'README.md'}")
 
     if args.tylko_pakuj:
