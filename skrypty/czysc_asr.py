@@ -402,7 +402,7 @@ def main() -> None:
     a.add_argument("--karty", help="numery kart po przecinku: po jednym procesie na kartę")
     a.add_argument("--czesc", default="0/1", help="K/N: tylko ta część zbioru (używane wewnętrznie przez --karty)")
     a.add_argument("--model", default="moondream/parakeet-ultra")
-    a.add_argument("--watki", type=int, default=32, help="równoległe żądania do Photon")
+    a.add_argument("--watki", type=int, default=64, help="równoległe żądania do Photon na kartę (Photon sam łączy je w partie na GPU)")
     a.add_argument("--partia", type=int, default=512, help="ile klipów dekodować naraz do RAM (następna partia w tle)")
     a.add_argument("--dekodery", type=int, default=4, help="wątki dekodujące audio na proces karty")
     a.add_argument("--limit", type=int, help="tylko N klipów (próba)")
