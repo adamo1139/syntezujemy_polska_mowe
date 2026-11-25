@@ -82,22 +82,29 @@ def krok_asr_na_kartach(args) -> None:
     procesy = []
     for i, karta in enumerate(karty):
         polecenie = [sys.executable, __file__, "asr", args.katalog, "--praca", str(praca), "--czesc", f"{i}/{len(karty)}",
-                     "--model", args.model, "--watki", str(args.watki)]
+                     "--model", args.model, "--watki", str(args.watki), "--partia", str(args.partia),
+                     "--dekodery", str(args.dekodery)]
         if args.limit:
             polecenie += ["--limit", str(args.limit)]
         log = (praca / f"asr_karta{karta}.log").open("w")
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": karta}
         procesy.append((karta, subprocess.Popen(polecenie, env=env, stdout=log, stderr=subprocess.STDOUT), log))
         print(f"karta {karta}: część {i}/{len(karty)}, log {praca / f'asr_karta{karta}.log'}", flush=True)
+    policz = lambda: sum(sum(1 for _ in f.open(encoding="utf-8")) for f in praca.glob("asr_*_z_*.jsonl"))   # noqa: E731
+    wszystkich = len(wczytaj_manifest(Path(args.katalog)))
+    na_starcie = policz()
+    print(f"Do zrobienia: {wszystkich - na_starcie} z {wszystkich} klipów ({na_starcie} już gotowych)", flush=True)
     try:
-        ostatnio = time.time()
+        t_pop, n_pop = time.time(), na_starcie
         while any(p.poll() is None for _, p, _ in procesy):
             time.sleep(5)
-            if time.time() - ostatnio < 60:
+            if time.time() - t_pop < 30:
                 continue
-            ostatnio = time.time()
-            zrobione = sum(sum(1 for _ in f.open(encoding="utf-8")) for f in praca.glob("asr_*_z_*.jsonl"))
-            print(f"  transkrypcji: {zrobione}", flush=True)
+            teraz, zrobione = time.time(), policz()
+            tempo = (zrobione - n_pop) / (teraz - t_pop)
+            zostalo = (wszystkich - zrobione) / tempo / 60 if tempo > 0 else float("nan")
+            print(f"  {zrobione}/{wszystkich} klipów, {tempo:.0f} klipów/s, zostało ok. {zostalo:.0f} min", flush=True)
+            t_pop, n_pop = teraz, zrobione
     except KeyboardInterrupt:
         for _, p, _ in procesy:
             p.terminate()
@@ -135,34 +142,55 @@ def krok_asr(args) -> None:
 
     t0, zrobione, bledy = time.time(), 0, 0
     with md.photon(args.model) as mowa, wyjscie.open("a", encoding="utf-8") as plik:
-        def jeden(w):
+        import numpy as np
+        import soundfile as sf
+
+        def dekoduj(w):
+            """Plik (FLAC/Opus/WAV) -> mono float32 w pamięci; Photon przyjmuje PCM z sample_rate bez plików."""
             try:
-                sciezka = katalog / w["audio"]
-                if sciezka.suffix.lower() in (".ogg", ".opus"):   # Opus: dekodowanie do tymczasowego WAV (pewne wejście)
-                    import tempfile
-                    import soundfile as sf
-                    x, sr = sf.read(str(sciezka), dtype="float32")
-                    with tempfile.NamedTemporaryFile(suffix=".wav") as tmp:
-                        sf.write(tmp.name, x, sr, subtype="PCM_16")
-                        wynik = mowa.transcribe(audio=tmp.name)
-                else:
-                    wynik = mowa.transcribe(audio=str(sciezka))
-                return w, wynik["text"], None
+                x, sr = sf.read(str(katalog / w["audio"]), dtype="float32", always_2d=True)
+                x = np.nan_to_num(x.mean(axis=1), nan=0.0, posinf=1.0, neginf=-1.0)
+                # Do 16 kHz tutaj (Parakeet i tak tyle bierze): Photon nie przepróbkowuje sam — jego przepróbkowanie
+                # wychodziło ponad [-1, 1] i odrzucało klip — a my na końcu przycinamy do zakresu.
+                if sr != 16000:   # to samo natywne przepróbkowanie, którego używa Photon (kestrel_native)
+                    import kestrel_native
+                    x = np.ascontiguousarray(x, dtype=np.float32)
+                    x = np.asarray(kestrel_native.resample_audio_mono(
+                        x, int(sr), 16000, max_output_values=int(np.ceil(len(x) * 16000 / sr)) + 64), dtype=np.float32)
+                    sr = 16000
+                return w, np.ascontiguousarray(np.clip(x, -1.0, 1.0), dtype=np.float32), sr, None
+            except Exception as e:
+                return w, None, None, repr(e)
+
+        def jeden(zdekodowany):
+            w, x, sr, blad = zdekodowany
+            if blad:
+                return w, None, blad
+            try:
+                return w, mowa.transcribe(audio=x, sample_rate=sr)["text"], None
             except Exception as e:  # jeden zły plik nie zatrzymuje części
                 return w, None, repr(e)
 
-        with ThreadPoolExecutor(args.watki) as pula:
-            for w, tekst, blad in pula.map(jeden, klipy):
-                if blad:
-                    bledy += 1
-                    print(f"  błąd {w['id']}: {blad}", flush=True)
-                    continue
-                plik.write(json.dumps({"id": w["id"], "asr": tekst}, ensure_ascii=False) + "\n")
-                zrobione += 1
-                if zrobione % 500 == 0:
-                    plik.flush()
-                    tempo = zrobione / (time.time() - t0)
-                    print(f"  {zrobione}/{len(klipy)}  {tempo:.1f} klipów/s  błędów {bledy}", flush=True)
+        # Dekodowanie partiami do RAM: następna partia dekoduje się w tle, gdy bieżąca idzie przez GPU.
+        partie = [klipy[i:i + args.partia] for i in range(0, len(klipy), args.partia)]
+        with ThreadPoolExecutor(args.dekodery) as pula_dek, ThreadPoolExecutor(args.watki) as pula:
+            nastepna = [pula_dek.submit(dekoduj, w) for w in partie[0]]
+            for nr in range(len(partie)):
+                biezaca = [f.result() for f in nastepna]
+                if nr + 1 < len(partie):
+                    nastepna = [pula_dek.submit(dekoduj, w) for w in partie[nr + 1]]
+                for w, tekst, blad in pula.map(jeden, biezaca):
+                    if blad:
+                        bledy += 1
+                        print(f"  błąd {w['id']}: {blad}", flush=True)
+                        continue
+                    plik.write(json.dumps({"id": w["id"], "asr": tekst}, ensure_ascii=False) + "\n")
+                    zrobione += 1
+                    if zrobione % 500 == 0:
+                        plik.flush()
+                        tempo = zrobione / (time.time() - t0)
+                        print(f"  {zrobione}/{len(klipy)}  {tempo:.1f} klipów/s  błędów {bledy}", flush=True)
+                del biezaca
     print(f"część {k}/{n}: gotowe {zrobione}, błędów {bledy}, {time.time() - t0:.0f} s", flush=True)
     if bledy > max(10, zrobione):  # większość klipów się nie udała: to nie pojedyncze złe pliki
         sys.exit(f"część {k}/{n}: {bledy} błędów na {zrobione} transkrypcji — coś jest nie tak (patrz błędy wyżej)")
@@ -375,6 +403,8 @@ def main() -> None:
     a.add_argument("--czesc", default="0/1", help="K/N: tylko ta część zbioru (używane wewnętrznie przez --karty)")
     a.add_argument("--model", default="moondream/parakeet-ultra")
     a.add_argument("--watki", type=int, default=32, help="równoległe żądania do Photon")
+    a.add_argument("--partia", type=int, default=512, help="ile klipów dekodować naraz do RAM (następna partia w tle)")
+    a.add_argument("--dekodery", type=int, default=4, help="wątki dekodujące audio na proces karty")
     a.add_argument("--limit", type=int, help="tylko N klipów (próba)")
 
     o = sub.add_parser("ocen", help="porównanie z tekstem, decyzja, raport")
