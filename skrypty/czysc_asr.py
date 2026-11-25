@@ -30,6 +30,7 @@ import collections
 import difflib
 import hashlib
 import json
+import os
 import re
 import shutil
 import statistics
@@ -297,6 +298,26 @@ def porownaj(ref: list[str], hyp: list[str]) -> dict:
     }
 
 
+_NORMALIZUJ = None
+
+
+def _init_oceny() -> None:
+    global _NORMALIZUJ
+    sys.path.insert(0, str(KATALOG_PROJEKTU / "liczby"))
+    from normalizuj import normalizuj
+    _NORMALIZUJ = normalizuj
+
+
+def _ocen_partie(partia: list[tuple]) -> list[dict]:
+    wynik = []
+    for id_, tekst, asr_, sekundy, audio in partia:
+        ref = do_porownania(tekst, _NORMALIZUJ)
+        hyp = do_porownania(asr_ or "", _NORMALIZUJ)
+        wynik.append({"id": id_, "tekst": tekst, "asr": asr_, "sekundy": sekundy, "audio": audio,
+                      **porownaj(ref, hyp), "znaki_na_s": len(" ".join(ref)) / max(0.1, sekundy)})
+    return wynik
+
+
 def krok_ocen(args) -> None:
     sys.path.insert(0, str(KATALOG_PROJEKTU / "liczby"))
     from normalizuj import normalizuj
@@ -319,13 +340,19 @@ def krok_ocen(args) -> None:
         sys.exit(f"{len(bez_asr)} klipów bez transkrypcji to ponad 5% zbioru — wygląda na niedokończony krok asr, "
                  "a nie na pojedyncze złe pliki. Dokończ asr albo pomiń --usun-bez-asr.")
 
-    oceny = []
-    for w in klipy:
-        ref = do_porownania(w["tekst"], normalizuj)
-        hyp = do_porownania(asr[w["id"]] or "", normalizuj)
-        o = {"id": w["id"], "tekst": w["tekst"], "asr": asr[w["id"]], "sekundy": w["sekundy"], "audio": w["audio"],
-             **porownaj(ref, hyp), "znaki_na_s": len(" ".join(ref)) / max(0.1, w["sekundy"])}
-        oceny.append(o)
+    # porównanie (normalizacja liczb Morfeuszem) na wszystkich rdzeniach, partiami po 2000 klipów
+    import multiprocessing as mp
+    from concurrent.futures import ProcessPoolExecutor
+    zadania = [(w["id"], w["tekst"], asr[w["id"]], w["sekundy"], w["audio"]) for w in klipy]
+    partie = [zadania[i:i + 2000] for i in range(0, len(zadania), 2000)]
+    oceny, t0 = [], time.time()
+    with ProcessPoolExecutor(args.procesy, mp_context=mp.get_context("spawn"), initializer=_init_oceny) as pula:
+        for nr, wynik in enumerate(pula.map(_ocen_partie, partie), 1):
+            oceny += wynik
+            if nr % 20 == 0 or nr == len(partie):
+                dt = time.time() - t0
+                print(f"  ocenionych {len(oceny)}/{len(zadania)} [{dt / 60:.1f} min, zostało ok. "
+                      f"{(len(zadania) - len(oceny)) * dt / len(oceny) / 60:.0f} min]", flush=True)
 
     # tempo: odchylenie od mediany w skali MAD (odporne na wartości odstające)
     tempa = [o["znaki_na_s"] for o in oceny]
@@ -434,6 +461,7 @@ def main() -> None:
     o = sub.add_parser("ocen", help="porównanie z tekstem, decyzja, raport")
     o.add_argument("katalog")
     o.add_argument("--praca")
+    o.add_argument("--procesy", type=int, default=os.cpu_count(), help="procesy porównujące (domyślnie wszystkie rdzenie)")
     o.add_argument("--usun-bez-asr", action="store_true",
                    help="klipy bez transkrypcji (ASR się nie udał, np. przester) też do usun.txt")
     o.add_argument("--usun-procent", type=float,
