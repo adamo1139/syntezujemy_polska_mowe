@@ -135,6 +135,8 @@ def krok_wybierz(args) -> None:
     oceny = wyniki_oceny(praca)
     pomin = wczytaj_pomin(args)
     manifest = {w["id"]: w for w in wczytaj_manifest(katalog) if w["id"] not in pomin}
+    if args.czesciowo:   # próba: tylko klipy, które już mają ocenę
+        manifest = {i: w for i, w in manifest.items() if i in oceny and oceny[i]["utmos"] is not None}
     if pomin:
         print(f"--pomin: {len(pomin)} klipów pominiętych (np. odrzuconych przez ASR); liczę z {len(manifest)}")
     bez_oceny = [i for i in manifest if i not in oceny or oceny[i]["utmos"] is None]
@@ -166,14 +168,20 @@ def krok_wybierz(args) -> None:
         raport.append(f"ASR ({args.asr}): {len(asr)} klipów; wspólnych z UTMOS: {len(usun & asr)}; "
                       f"razem do usunięcia: {len(razem)} ({sek(razem & manifest.keys()):.1f} h, "
                       f"{100 * len(razem) / len(manifest):.1f}%); zostaje {sek(manifest.keys() - razem):.1f} h")
-    if args.probki:
+    if args.probki or args.najlepsze:
         kat = praca / "probki"
         shutil.rmtree(kat, ignore_errors=True)
         kat.mkdir(parents=True)
-        for nr, (u, i) in enumerate(ok[: args.probki]):
+        wybrane = [("najgorszy", nr, u, i) for nr, (u, i) in enumerate(ok[: args.probki])]
+        wybrane += [("najlepszy", nr, u, i) for nr, (u, i) in enumerate(ok[::-1][: args.najlepsze])]
+        opis = []
+        for rodzaj, nr, u, i in wybrane:
             zr = katalog / manifest[i]["audio"]
-            shutil.copy(zr, kat / f"{nr:03d}_utmos{u:.2f}_{i}{zr.suffix}")
-        raport.append(f"Próbki do odsłuchu: {kat} ({args.probki} najgorszych)")
+            nazwa = f"{rodzaj}_{nr:03d}_utmos{u:.2f}_{i}{zr.suffix}"
+            shutil.copy(zr, kat / nazwa)
+            opis.append(f"{nazwa}\n    {manifest[i].get('tekst', '')}\n")
+        (kat / "opis.txt").write_text("".join(opis), encoding="utf-8")
+        raport.append(f"Próbki do odsłuchu: {kat} ({args.probki} najgorszych, {args.najlepsze} najlepszych; teksty w opis.txt)")
     (praca / "raport.txt").write_text("\n".join(raport) + "\n", encoding="utf-8")
     print("\n".join(raport))
     print(f"Lista: {praca / ('usun_razem.txt' if args.asr else 'usun.txt')}")
@@ -192,8 +200,11 @@ def main() -> None:
     p.add_argument("--prog", type=float, help="wybierz: usuń klipy z UTMOS poniżej tej wartości")
     p.add_argument("--asr", help="wybierz: usun.txt z czysc_asr.py — połącz z listą UTMOS w usun_razem.txt")
     p.add_argument("--probki", type=int, default=0, help="wybierz: tyle najgorszych klipów do odsłuchu")
+    p.add_argument("--najlepsze", type=int, default=0, help="wybierz: tyle najlepszych klipów do odsłuchu")
+    p.add_argument("--czesciowo", action="store_true",
+                   help="wybierz: licz tylko z już ocenionych klipów (próba po ocen --limit)")
     a = p.parse_args()
-    if a.krok == "wybierz" and not a.usun_procent and a.prog is None:
+    if a.krok == "wybierz" and not a.usun_procent and a.prog is None and not a.czesciowo:
         p.error("wybierz: podaj --usun-procent albo --prog")
     {"ocen": krok_ocen, "wybierz": krok_wybierz}[a.krok](a)
 
