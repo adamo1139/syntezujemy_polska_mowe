@@ -59,6 +59,35 @@ def wczytaj_manifest(katalog: Path) -> list[dict]:
     return wiersze
 
 
+_FILTR_48_16: dict = {}
+
+
+def do_16khz(x, sr: int):
+    """Mono float32 -> 16 kHz. 48 kHz (wszystkie nasze syntezy): filtr dolnoprzepustowy (sinc z oknem Kaisera,
+    pasmo do 7,2 kHz) i co trzecia próbka jednym conv1d na GPU — zdejmuje przepróbkowanie z CPU, które przy ASR
+    na 7 kartach jest wąskim gardłem. Inne częstotliwości: natywne przepróbkowanie Photon (kestrel_native)."""
+    import numpy as np
+    if sr == 16000:
+        return x, sr
+    if sr == 48000:
+        import torch
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        h = _FILTR_48_16.get(dev)
+        if h is None:
+            n = np.arange(-48, 49)                       # 97 współczynników
+            fc = 7200 / 48000                            # granica pasma względem 48 kHz
+            h = 2 * fc * np.sinc(2 * fc * n) * np.kaiser(len(n), 8.0)
+            h = torch.tensor(h / h.sum(), dtype=torch.float32, device=dev).view(1, 1, -1)
+            _FILTR_48_16[dev] = h
+        with torch.no_grad():
+            t = torch.from_numpy(x).to(dev, non_blocking=True).view(1, 1, -1)
+            y = torch.nn.functional.conv1d(t, h, stride=3, padding=48).view(-1)
+            return y.cpu().numpy(), 16000
+    import kestrel_native
+    y = kestrel_native.resample_audio_mono(x, int(sr), 16000, max_output_values=int(np.ceil(len(x) * 16000 / sr)) + 64)
+    return np.asarray(y, dtype=np.float32), 16000
+
+
 def czesc_klipu(id_: str, n: int) -> int:
     return int(hashlib.sha1(id_.encode()).hexdigest(), 16) % n
 
@@ -152,12 +181,7 @@ def krok_asr(args) -> None:
                 x = np.nan_to_num(x.mean(axis=1), nan=0.0, posinf=1.0, neginf=-1.0)
                 # Do 16 kHz tutaj (Parakeet i tak tyle bierze): Photon nie przepróbkowuje sam — jego przepróbkowanie
                 # wychodziło ponad [-1, 1] i odrzucało klip — a my na końcu przycinamy do zakresu.
-                if sr != 16000:   # to samo natywne przepróbkowanie, którego używa Photon (kestrel_native)
-                    import kestrel_native
-                    x = np.ascontiguousarray(x, dtype=np.float32)
-                    x = np.asarray(kestrel_native.resample_audio_mono(
-                        x, int(sr), 16000, max_output_values=int(np.ceil(len(x) * 16000 / sr)) + 64), dtype=np.float32)
-                    sr = 16000
+                x, sr = do_16khz(np.ascontiguousarray(x, dtype=np.float32), int(sr))
                 return w, np.ascontiguousarray(np.clip(x, -1.0, 1.0), dtype=np.float32), sr, None
             except Exception as e:
                 return w, None, None, repr(e)
