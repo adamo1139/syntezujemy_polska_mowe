@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import collections
 import hashlib
 import json
 import os
@@ -164,6 +165,72 @@ def juz_zrobione(manifest: Path) -> set[str]:
 # ---------------------------------------------------------------- synteza
 
 
+def rdzenie_fizyczne() -> list[list[int]]:
+    """Fizyczne rdzenie CPU jako listy wątków logicznych (np. [[0, 12], [1, 13], ...] przy SMT), z /sys."""
+    grupy: dict[tuple, list[int]] = {}
+    for d in sorted(Path("/sys/devices/system/cpu").glob("cpu[0-9]*"), key=lambda x: int(x.name[3:])):
+        try:
+            klucz = (int((d / "topology/physical_package_id").read_text()), int((d / "topology/core_id").read_text()))
+        except OSError:
+            continue
+        if int(d.name[3:]) in os.sched_getaffinity(0):
+            grupy.setdefault(klucz, []).append(int(d.name[3:]))
+    return [grupy[k] for k in sorted(grupy, key=lambda k: min(grupy[k]))]
+
+
+def potomkowie(pid: int) -> set[int]:
+    """Wszystkie procesy potomne (rekurencyjnie), z /proc/<pid>/task/*/children."""
+    wynik, kolejka = set(), [pid]
+    while kolejka:
+        p = kolejka.pop()
+        for zadanie in Path(f"/proc/{p}/task").glob("*"):
+            try:
+                dzieci = [int(x) for x in (zadanie / "children").read_text().split()]
+            except OSError:
+                continue
+            for d in dzieci:
+                if d not in wynik:
+                    wynik.add(d)
+                    kolejka.append(d)
+    return wynik
+
+
+def ustaw_rdzenie(pid: int, rdzenie: set[int]) -> None:
+    """Przypięcie wszystkich wątków procesu (sched_setaffinity działa na pojedynczy wątek)."""
+    for zadanie in Path(f"/proc/{pid}/task").glob("*"):
+        try:
+            os.sched_setaffinity(int(zadanie.name), rdzenie)
+        except OSError:
+            pass
+
+
+def przypnij_procesy(karty: list[int], watki: int) -> None:
+    """Każdy proces karty: `watki` wątków logicznych CPU na wyłączność (kolejne wątki rdzeń po rdzeniu, bliźniaki SMT
+    obok siebie); proces sterujący: wszystkie pozostałe."""
+    kolejne = [c for g in rdzenie_fizyczne() for c in g]
+    if len(kolejne) <= len(karty) * watki:
+        print(f"--przypnij: {len(kolejne)} wątków CPU na {len(karty)} kart × {watki} — za mało, pomijam przypinanie.")
+        return
+    q = lambda zap: subprocess.run(["nvidia-smi", f"--query-{zap}", "--format=csv,noheader"],   # noqa: E731
+                                   capture_output=True, text=True).stdout.strip().splitlines()
+    uuid_na_numer = {u.strip(): int(i) for i, u in (l.split(",") for l in q("gpu=index,uuid"))}
+    nasze = potomkowie(os.getpid())
+    pid_karty: dict[int, list[int]] = {}
+    for l in q("compute-apps=pid,gpu_uuid"):
+        pid, uuid = (x.strip() for x in l.split(","))
+        if int(pid) in nasze:
+            pid_karty.setdefault(uuid_na_numer.get(uuid, -1), []).append(int(pid))
+    opis = []
+    for i, karta in enumerate(karty):
+        rdzenie = set(kolejne[i * watki:(i + 1) * watki])
+        for pid in pid_karty.get(karta, []):
+            ustaw_rdzenie(pid, rdzenie)
+        opis.append(f"karta {karta} -> {sorted(rdzenie)}" + ("" if karta in pid_karty else " (nie znaleziono procesu)"))
+    reszta = set(kolejne[len(karty) * watki:])
+    ustaw_rdzenie(os.getpid(), reszta)
+    print("Przypięcie: " + "; ".join(opis) + f"; proces sterujący -> {sorted(reszta)}", flush=True)
+
+
 async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: int) -> None:
     import numpy as np
     import soundfile as sf
@@ -191,6 +258,8 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
     )
     try:
         await serwer.wait_for_ready()
+        if args.przypnij:
+            przypnij_procesy(args.wybrane_karty, args.przypnij)
         info = await serwer.get_model_info()
         czestotliwosc = int(info["sample_rate"])
         if args.format == "opus" and czestotliwosc not in (8000, 12000, 16000, 24000, 48000):
@@ -218,6 +287,8 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
         semafor = asyncio.Semaphore(args.rownolegle * liczba_kart)
         blokada_zapisu = asyncio.Lock()
         stan = {"sekundy": 0.0, "gotowe": 0, "bledy": 0, "bledy_z_rzedu": 0}
+        okno = collections.deque(maxlen=501)   # (czas, sekundy audio łącznie): prędkość z ostatnich 500 klipów
+        okno.append((time.time(), 0.0))
         przerwij = asyncio.Event()
         t_synteza = time.time()
 
@@ -279,11 +350,16 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
                 stan["sekundy"] += sekundy
                 stan["gotowe"] += 1
                 stan["bledy_z_rzedu"] = 0
+                teraz = time.time()
+                okno.append((teraz, stan["sekundy"]))
                 if stan["gotowe"] % args.co_ile == 0:
-                    minelo = time.time() - t_synteza
+                    t0_okna, s0_okna = okno[0]
+                    predkosc = (stan["sekundy"] - s0_okna) / max(teraz - t0_okna, 1e-9)
+                    pozostalo_h = (len(pozycje) - stan["gotowe"]) * (stan["sekundy"] / stan["gotowe"]) / max(predkosc, 1e-9) / 3600
                     print(
                         f"  {stan['gotowe']}/{len(pozycje)} klipów, {stan['sekundy'] / 3600:.2f} h audio, "
-                        f"{stan['sekundy'] / minelo:.0f}x czas rzeczywisty, błędy: {stan['bledy']}",
+                        f"{predkosc:.0f}x czas rzeczywisty, "
+                        f"zostało ok. {pozostalo_h:.1f} h, błędy: {stan['bledy']}",
                         flush=True,
                     )
 
@@ -348,6 +424,9 @@ def main() -> None:
     g.add_argument("--max-tokenow", type=int, default=16384, help="max_num_batched_tokens")
     g.add_argument("--co-ile", type=int, default=100, help="co ile klipów wypisać postęp")
     g.add_argument("--max-bledow-z-rzedu", type=int, default=50, help="po tylu błędach pod rząd przerwij przebieg")
+    g.add_argument("--przypnij", type=int, nargs="?", const=2, default=0, metavar="WATKI",
+                   help="każdy proces karty na WATKI wątkach CPU na wyłączność (domyślnie 2 = jeden rdzeń z bliźniakiem "
+                        "SMT; OMP_NUM_THREADS=WATKI), proces sterujący (kodowanie, zapis) na pozostałych")
     args = p.parse_args()
 
     karty = wykryj_karty()
@@ -372,6 +451,10 @@ def main() -> None:
     # Pominiętych kart procesy w ogóle nie zobaczą.
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(numer) for numer in wybrane)
+    args.wybrane_karty = list(wybrane)
+    if args.przypnij:   # dziedziczą procesy kart: bez tego każdy rusza tyle wątków OpenMP, ile jest rdzeni
+        for zm in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+            os.environ[zm] = str(args.przypnij)
 
     pozycje = wczytaj_teksty(args)
     identyfikatory = [pozycja["id"] for pozycja in pozycje]
