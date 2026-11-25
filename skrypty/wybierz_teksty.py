@@ -7,7 +7,8 @@ Zasady wyboru (deterministyczne dla danego --ziarno):
   - przy jednych odwiedzinach rozmowy: --pytan pytań użytkownika i --odpowiedzi fragmentów odpowiedzi;
     gdy temat nie ma już nieodwiedzonych rozmów, wraca do tych samych po kolejne fragmenty,
     aż się wyczerpie (małe tematy wchodzą wtedy w całości);
-  - koniec, gdy szacowany czas (znaki / 14 na sekundę) osiągnie --godziny;
+  - koniec, gdy szacowany czas (znaki / --znakow-na-sekunde, domyślnie 14) osiągnie --godziny; głos „poziomka”
+    mówi ok. 18,7 znaku/s, więc dla faktycznych godzin nagrań podać --znakow-na-sekunde 18.7;
   - każda rozmowa trafia w całości do jednej z --czesci części (pole „czesc”), a każda część ma
     ten sam rozkład tematów. Syntezę jednej części robi `generuj.py --czesc N`.
 
@@ -50,6 +51,7 @@ GOTOWE_WZORCE = {
 
 
 def main() -> None:
+    global ZNAKI_NA_SEKUNDE
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--fragmenty", default=str(KATALOG_PROJEKTU / "teksty" / "fragmenty.jsonl"))
     p.add_argument("--wyjscie", default=str(KATALOG_PROJEKTU / "teksty" / "wybrane.jsonl"))
@@ -60,9 +62,12 @@ def main() -> None:
     p.add_argument("--odpowiedzi", type=int, default=2, help="tyle fragmentów odpowiedzi z rozmowy przy jednych odwiedzinach")
     p.add_argument("--pomin", action="append", default=[], help="plik .jsonl z wcześniejszym wyborem; jego rozmowy są pomijane")
     p.add_argument("--ziarno", type=int, default=0)
+    p.add_argument("--znakow-na-sekunde", type=float, default=ZNAKI_NA_SEKUNDE,
+                   help="tempo głosu do szacowania czasu (domyślnie 14; „poziomka” w VoxCPM2 mówi ok. 18,7)")
     p.add_argument("--wzorzec", action="append", default=[], help="regex albo @daty/@matematyka/@liczby (patrz wyżej)")
     p.add_argument("--temat", action="append", default=[], help="tylko tematy zawierające ten tekst")
     args = p.parse_args()
+    ZNAKI_NA_SEKUNDE = args.znakow_na_sekunde
     import re
     wzorce = [re.compile(GOTOWE_WZORCE.get(w, w)) for w in args.wzorzec]
 
