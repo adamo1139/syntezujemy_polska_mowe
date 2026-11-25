@@ -1,0 +1,95 @@
+{
+ "ultra": {
+  "rtf": 0.1918,
+  "sekund_liczenia": 8.5,
+  "sekund_mowy": 44.32,
+  "cer_sredni": 0.0012,
+  "cer_mediana": 0.0,
+  "wczytanie_s": 11.4,
+  "watki": 1,
+  "przyklady": [
+   {
+    "tekst": "Rozumiem. W takim razie może być potrzebny klucz udarowy lub nasadowy. Czy ma Pan/i takie narzędzia pod ręką? Jeśli nie, możemy je pożyczyć.",
+    "asr": "Rozumiem. W takim razie może być potrzebny klucz udarowy lub nasadowy. Czy ma Pani takie narzędzia pod ręką? Jeśli nie, możemy je pożyczyć?"
+   },
+   {
+    "tekst": "Sprowadzanie auta z Niemiec może być korzystne, ale trzeba być ostrożnym. Przede wszystkim sprawdź historię serwisową pojazdu, czy nie było poważnych wypadków i czy przebieg jest zgodny z dokumentami.",
+    "asr": "Wprowadzanie auta z Niemiec może być korzystne, ale trzeba być ostrożnym. Przede wszystkim sprawdź historię serwisową pojazdu, czy nie było poważnych wypadków i czy przebieg jest zgodny z dokumentami."
+   },
+   {
+    "tekst": "To pytanie jest bardzo interesujące i aktualne. Sztuczna inteligencja ma potencjał, aby znacznie poprawić nasze zrozumienie i leczenie chorób neurodegeneracyjnych.",
+    "asr": "To pytanie jest bardzo interesujące i aktualne. Sztuczna inteligencja ma potencjał, aby znacznie poprawić nasze zrozumienie i leczenie chorób neurodegeneracyjnych."
+   },
+   {
+    "tekst": "Jednak decyzja ta powinna być dobrze przemyślana i dostosowana do indywidualnych potrzeb i celów studenta.",
+    "asr": "Jednak decyzja ta powinna być dobrze przemyślana i dostosowana do indywidualnych potrzeb i celów studenta."
+   },
+   {
+    "tekst": "Optymalna wysokość koszenia to około pięciu do siedmiu centymetrów. W upały można podnieść tę wysokość do ośmiu centymetrów, żeby trawa miała więcej cienia i mniej parowała wody.",
+    "asr": "Optymalna wysokość koszenia to około 5-7 cm. W upały można podnieść tę wysokość do 8 cm, żeby trawa miała więcej cienia i mniej parowała wody."
+   }
+  ]
+ },
+ "redux": {
+  "rtf": 0.0811,
+  "sekund_liczenia": 3.59,
+  "sekund_mowy": 44.32,
+  "cer_sredni": 0.0,
+  "cer_mediana": 0.0,
+  "wczytanie_s": 4.6,
+  "watki": 1,
+  "przyklady": [
+   {
+    "tekst": "Rozumiem. W takim razie może być potrzebny klucz udarowy lub nasadowy. Czy ma Pan/i takie narzędzia pod ręką? Jeśli nie, możemy je pożyczyć.",
+    "asr": "Rozumiem. W takim razie może być potrzebny klucz udarowy lub nasadowy. Czy ma pani takie narzędzia pod ręką? Jeśli nie, możemy je pożyczyć?"
+   },
+   {
+    "tekst": "Sprowadzanie auta z Niemiec może być korzystne, ale trzeba być ostrożnym. Przede wszystkim sprawdź historię serwisową pojazdu, czy nie było poważnych wypadków i czy przebieg jest zgodny z dokumentami.",
+    "asr": "Sprowadzanie auta z Niemiec może być korzystne, ale trzeba być ostrożnym przede wszystkim sprawdź historię serwisową pojazdu, czy nie było poważnych wypadków i czy przebieg jest zgodny z dokumentami"
+   },
+   {
+    "tekst": "To pytanie jest bardzo interesujące i aktualne. Sztuczna inteligencja ma potencjał, aby znacznie poprawić nasze zrozumienie i leczenie chorób neurodegeneracyjnych.",
+    "asr": "To pytanie jest bardzo interesujące i aktualne. Sztuczna inteligencja ma potencjał, aby znacznie poprawić nasze zrozumienie i leczenie chorób neurodegeneracyjnych."
+   },
+   {
+    "tekst": "Jednak decyzja ta powinna być dobrze przemyślana i dostosowana do indywidualnych potrzeb i celów studenta.",
+    "asr": "Jednak decyzja ta powinna być dobrze przemyślana i dostosowana do indywidualnych potrzeb i celów studenta."
+   },
+   {
+    "tekst": "Optymalna wysokość koszenia to około pięciu do siedmiu centymetrów. W upały można podnieść tę wysokość do ośmiu centymetrów, żeby trawa miała więcej cienia i mniej parowała wody.",
+    "asr": "Optymalna wysokość koszenia to około 5 do 7 cm. W upały można podnieść tę wysokość do 8 cm, żeby trawa miała więcej cienia i mniej parowała wody."
+   }
+  ]
+ },
+ "canary": {
+  "rtf": 0.7111,
+  "sekund_liczenia": 31.52,
+  "sekund_mowy": 44.32,
+  "cer_sredni": 0.0054,
+  "cer_mediana": 0.0,
+  "wczytanie_s": 115.4,
+  "watki": 1,
+  "przyklady": [
+   {
+    "tekst": "Rozumiem. W takim razie może być potrzebny klucz udarowy lub nasadowy. Czy ma Pan/i takie narzędzia pod ręką? Jeśli nie, możemy je pożyczyć.",
+    "asr": "Rozumiem. W takim razie może być potrzebny klucz udarowy lub nasadowy. Czy ma Pani takie narzędzia pod ręką? Jeśli nie, możemy je pożyczyć?"
+   },
+   {
+    "tekst": "Sprowadzanie auta z Niemiec może być korzystne, ale trzeba być ostrożnym. Przede wszystkim sprawdź historię serwisową pojazdu, czy nie było poważnych wypadków i czy przebieg jest zgodny z dokumentami.",
+    "asr": "Sprowadzanie auta z Niemiec może być korzystne, ale trzeba być ostrożnym. Przede wszystkim sprawdź historię serwisową pojazdu, czy nie było poważnych wypadków i czy przebieg jest zgodny z dokumentami."
+   },
+   {
+    "tekst": "To pytanie jest bardzo interesujące i aktualne. Sztuczna inteligencja ma potencjał, aby znacznie poprawić nasze zrozumienie i leczenie chorób neurodegeneracyjnych.",
+    "asr": "To pytanie jest bardzo interesujące i aktualne. Sztuczna inteligencja ma potencjał, aby znacznie poprawić nasze zrozumienie i leczenie chorób neurodegeneracyjnych."
+   },
+   {
+    "tekst": "Jednak decyzja ta powinna być dobrze przemyślana i dostosowana do indywidualnych potrzeb i celów studenta.",
+    "asr": "Jednak decyzja ta powinna być dobrze przemyślana i dostosowana do indywidualnych potrzeb i celów studenta."
+   },
+   {
+    "tekst": "Optymalna wysokość koszenia to około pięciu do siedmiu centymetrów. W upały można podnieść tę wysokość do ośmiu centymetrów, żeby trawa miała więcej cienia i mniej parowała wody.",
+    "asr": "Opcjonalna wysokość koszenia to około 5-7 cm. W upały można podnieść tę wysokość do 8 cm, żeby trawa miała więcej cienia i mniej parowała wody."
+   }
+  ]
+ }
+}
