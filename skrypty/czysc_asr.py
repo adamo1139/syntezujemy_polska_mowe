@@ -137,7 +137,16 @@ def krok_asr(args) -> None:
     with md.photon(args.model) as mowa, wyjscie.open("a", encoding="utf-8") as plik:
         def jeden(w):
             try:
-                wynik = mowa.transcribe(audio=str(katalog / w["audio"]))
+                sciezka = katalog / w["audio"]
+                if sciezka.suffix.lower() in (".ogg", ".opus"):   # Opus: dekodowanie do tymczasowego WAV (pewne wejście)
+                    import tempfile
+                    import soundfile as sf
+                    x, sr = sf.read(str(sciezka), dtype="float32")
+                    with tempfile.NamedTemporaryFile(suffix=".wav") as tmp:
+                        sf.write(tmp.name, x, sr, subtype="PCM_16")
+                        wynik = mowa.transcribe(audio=tmp.name)
+                else:
+                    wynik = mowa.transcribe(audio=str(sciezka))
                 return w, wynik["text"], None
             except Exception as e:  # jeden zły plik nie zatrzymuje części
                 return w, None, repr(e)
@@ -348,7 +357,7 @@ def krok_ocen(args) -> None:
             wybrane += sorted(odsluch, key=lambda o: -o["cer"])[: args.probki - len(wybrane)]
         with (katalog_probek / "opis.txt").open("w", encoding="utf-8") as opis:
             for nr, o in enumerate(wybrane):
-                nazwa = f"{nr:03d}_{'usun' if o['powody'] else 'odsluch'}_{o['id']}.flac"
+                nazwa = f"{nr:03d}_{'usun' if o['powody'] else 'odsluch'}_{o['id']}{Path(o['audio']).suffix}"
                 shutil.copy(katalog / o["audio"], katalog_probek / nazwa)
                 opis.write(f"{nazwa}\n  powody: {', '.join(o['powody']) or '-'}  cer {o['cer']:.2f}\n"
                            f"  tekst: {o['tekst']}\n  asr:   {o['asr']}\n\n")

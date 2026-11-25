@@ -101,9 +101,10 @@ def z_parquet(katalog: Path, cel: Path) -> list[dict]:
                 if wpis.get("text_cyfry"):  # zbiór „liczby słownie”: trening na zapisie z cyframi
                     wpis["tekst_slowny"] = wpis["tekst"]
                     wpis["tekst"] = wpis.pop("text_cyfry")
-                sciezka = cel / f"{wpis['id']}.flac"
+                rozsz = ".ogg" if audio["bytes"][:4] == b"OggS" else ".flac"   # partie w Opus albo FLAC
+                sciezka = cel / f"{wpis['id']}{rozsz}"
                 if not sciezka.exists() or sciezka.stat().st_size != len(audio["bytes"]):
-                    tymczasowa = sciezka.with_suffix(".flac.tmp")
+                    tymczasowa = sciezka.with_suffix(rozsz + ".tmp")
                     tymczasowa.write_bytes(audio["bytes"])
                     tymczasowa.rename(sciezka)
                     zapisane += 1

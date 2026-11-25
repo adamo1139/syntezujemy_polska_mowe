@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Pakuje wynik syntezy (manifest.jsonl + audio/*.flac) do plików parquet i wysyła jako dataset na HF.
+"""Pakuje wynik syntezy (manifest.jsonl + audio/*.flac albo *.ogg) do plików parquet i wysyła jako dataset na HF.
 
-Format: kolumny `audio` (plik FLAC w środku, typ Audio z `datasets`) i `text`, plus metadane z manifestu.
+Format: kolumny `audio` (plik FLAC albo Ogg Opus w środku, typ Audio z `datasets`) i `text`, plus metadane z manifestu.
 Pliki `data/train-NNNNN-of-MMMMM.parquet` po ok. 500 MB i karta `README.md`.
 
 Jeśli pełny zestaw plików parquet już leży w katalogu paczek, pakowanie jest pomijane w całości
@@ -132,12 +132,13 @@ def zapisz_plik(sciezka: Path, wpisy: list[dict], schemat_pa, KOLUMNY: list[tupl
         kolumny[nazwa] = [w.get(pole) for w in wpisy]
     tabela = pa.Table.from_pydict(kolumny, schema=schemat_pa)
     tymczasowy = sciezka.with_suffix(".parquet.tmp")
-    # Audio jest już skompresowane (FLAC), więc bez dodatkowej kompresji; małe grupy wierszy dla podglądu na HF.
+    # Audio jest już skompresowane (FLAC / Opus), więc bez dodatkowej kompresji; małe grupy wierszy dla podglądu na HF.
     pq.write_table(tabela, tymczasowy, compression="none", row_group_size=100)
     tymczasowy.rename(sciezka)
 
 
 def karta(repo: str, wiersze: list[dict], czestotliwosc: int, zrodlo_tekstow: str, usuniete: int = 0) -> str:
+    format_audio = "Ogg Opus" if str(wiersze[0]["_sciezka"]).endswith(".ogg") else "FLAC"
     if usuniete:
         opis_filtra = (
             f"**Zbiór po filtrze ASR.** Usunięto {usuniete} klipów ({100 * usuniete / (usuniete + len(wiersze)):.0f}%) "
@@ -193,7 +194,7 @@ configs:
 
 # {repo.split("/")[-1]}
 
-Syntetyczna polska mowa: {godziny:.1f} h, {len(wiersze)} klipów, jeden głos, {czestotliwosc // 1000} kHz mono (FLAC).
+Syntetyczna polska mowa: {godziny:.1f} h, {len(wiersze)} klipów, jeden głos, {czestotliwosc // 1000} kHz mono ({format_audio}).
 Zbiór powstał do trenowania małych polskich modeli TTS (destylacja z VoxCPM2).
 
 {opis_filtra}
@@ -214,7 +215,7 @@ Zbiór powstał do trenowania małych polskich modeli TTS (destylacja z VoxCPM2)
 
 | kolumna | opis |
 |---|---|
-| `audio` | klip FLAC, {czestotliwosc} Hz, mono |
+| `audio` | klip {format_audio}, {czestotliwosc} Hz, mono |
 | `text` | tekst podany modelowi |{wiersz_cyfry}
 | `id` | identyfikator klipu |
 | `sekundy` | długość klipu |

@@ -193,6 +193,8 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
         await serwer.wait_for_ready()
         info = await serwer.get_model_info()
         czestotliwosc = int(info["sample_rate"])
+        if args.format == "opus" and czestotliwosc not in (8000, 12000, 16000, 24000, 48000):
+            sys.exit(f"Opus nie obsługuje {czestotliwosc} Hz — użyj --format flac")
         print(f"Gotowe po {time.time() - t_start:.0f} s. Częstotliwość wyjściowa: {czestotliwosc} Hz.")
 
         # Głos: latenty liczone raz i wysyłane z każdym żądaniem.
@@ -236,8 +238,13 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
                     ):
                         kawalki.append(kawalek)
                     fala = np.concatenate(kawalki, axis=0)
-                    sciezka = katalog_audio / f"{pozycja['id']}.flac"
-                    await asyncio.to_thread(sf.write, sciezka, fala, czestotliwosc, format="FLAC", subtype="PCM_16")
+                    if args.format == "opus":   # Ogg Opus; libsndfile: compression_level 0..1 ≈ 256..6 kbit/s
+                        sciezka = katalog_audio / f"{pozycja['id']}.ogg"
+                        await asyncio.to_thread(sf.write, sciezka, fala, czestotliwosc, format="OGG", subtype="OPUS",
+                                                compression_level=min(1.0, max(0.0, (256 - args.kbps) / 250)))
+                    else:
+                        sciezka = katalog_audio / f"{pozycja['id']}.flac"
+                        await asyncio.to_thread(sf.write, sciezka, fala, czestotliwosc, format="FLAC", subtype="PCM_16")
                 except Exception as blad:  # jeden zły tekst nie zatrzymuje całości
                     stan["bledy"] += 1
                     stan["bledy_z_rzedu"] += 1
@@ -262,6 +269,8 @@ async def syntezuj(args: argparse.Namespace, pozycje: list[dict], liczba_kart: i
                     "tryb_glosu": args.tryb if nazwa_glosu else None,
                     "cfg": args.cfg,
                     "kroki": args.kroki,
+                    "format": "opus" if args.format == "opus" else "flac",
+                    **({"kbps": args.kbps} if args.format == "opus" else {}),
                     "czas_generacji": round(time.time() - t0, 3),
                 }
                 async with blokada_zapisu:
@@ -311,6 +320,9 @@ def main() -> None:
     g.add_argument("--czesc", type=int, help="weź tylko teksty z tej części (pole „czesc” z wybierz_teksty.py)")
     g.add_argument("--limit", type=int, help="weź tylko N pierwszych tekstów (po --czesc)")
     g.add_argument("--wyjscie", default="wyniki/proba", help="katalog na audio/ i manifest.jsonl")
+    g.add_argument("--format", choices=["flac", "opus"], default="flac",
+                   help="flac (bez strat, ok. 370 kbit/s) albo opus (Ogg Opus, --kbps; 128 dla mowy przezroczyste, ok. 3× mniej)")
+    g.add_argument("--kbps", type=int, default=128, help="przepływność Opus w kbit/s (6–256)")
 
     g = p.add_argument_group("model i głos")
     g.add_argument("--model", default="openbmb/VoxCPM2", help="repo HF albo katalog lokalny")
