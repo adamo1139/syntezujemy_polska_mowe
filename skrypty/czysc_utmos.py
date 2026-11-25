@@ -43,9 +43,11 @@ def wyniki_oceny(praca: Path) -> dict[str, dict]:
     out = {}
     for f in sorted(praca.glob("utmos_*_z_*.jsonl")):
         for w in f.open(encoding="utf-8"):
-            if w.strip():
+            try:   # ostatnia linia może być w trakcie dopisywania przez inny proces albo ucięta przy przerwaniu
                 d = json.loads(w)
-                out[d["id"]] = d
+            except json.JSONDecodeError:
+                continue
+            out[d["id"]] = d
     return out
 
 
@@ -58,16 +60,17 @@ def krok_ocen_na_kartach(args) -> None:
     praca = Path(args.praca or Path(args.katalog) / "utmos")
     praca.mkdir(parents=True, exist_ok=True)
     procesy = []
-    for i, karta in enumerate(karty):
-        polecenie = [sys.executable, __file__, "ocen", args.katalog, "--praca", str(praca), "--czesc", f"{i}/{len(karty)}"]
+    sloty = [(karta, j) for karta in karty for j in range(args.na_karte)]
+    for i, (karta, j) in enumerate(sloty):
+        polecenie = [sys.executable, __file__, "ocen", args.katalog, "--praca", str(praca), "--czesc", f"{i}/{len(sloty)}"]
         if args.limit:
             polecenie += ["--limit", str(args.limit)]
         for f in args.pomin:
             polecenie += ["--pomin", f]
-        log = (praca / f"utmos_karta{karta}.log").open("w")
-        env = {**os.environ, "CUDA_VISIBLE_DEVICES": karta}
+        log = (praca / f"utmos_karta{karta}_{j}.log").open("w")
+        env = {**os.environ, "CUDA_VISIBLE_DEVICES": karta, "OMP_NUM_THREADS": "1"}
         procesy.append((karta, subprocess.Popen(polecenie, env=env, stdout=log, stderr=subprocess.STDOUT), log))
-        print(f"karta {karta}: część {i}/{len(karty)}, log {praca / f'utmos_karta{karta}.log'}", flush=True)
+    print(f"{len(sloty)} procesów ({args.na_karte} na kartę {','.join(karty)}), logi w {praca}", flush=True)
     pomin = wczytaj_pomin(args)
     wszystkich = sum(1 for w in wczytaj_manifest(Path(args.katalog)) if w["id"] not in pomin)
     try:
@@ -102,7 +105,7 @@ def krok_ocen(args) -> None:
     praca.mkdir(parents=True, exist_ok=True)
     k, n = (int(x) for x in args.czesc.split("/"))
     plik = praca / f"utmos_{k}_z_{n}.jsonl"
-    gotowe = gotowe_id(plik)
+    gotowe = set(wyniki_oceny(praca))   # ze wszystkich plików, także z wcześniejszego podziału na inną liczbę części
     pomin = wczytaj_pomin(args)
     klipy = [w for w in wczytaj_manifest(katalog)
              if czesc_klipu(w["id"], n) == k and w["id"] not in gotowe and w["id"] not in pomin]
@@ -194,6 +197,8 @@ def main() -> None:
     p.add_argument("--praca", help="katalog wyników (domyślnie <katalog>/utmos)")
     p.add_argument("--karty", help="ocen: numery kart po przecinku, po jednym procesie na kartę")
     p.add_argument("--czesc", default="0/1", help="K/N: tylko ta część zbioru (używane wewnętrznie przez --karty)")
+    p.add_argument("--na-karte", type=int, default=4,
+                   help="ocen: procesy na kartę (każdy ocenia po jednym klipie; kilka naraz lepiej zapełnia GPU)")
     p.add_argument("--limit", type=int, help="ocen: tylko N klipów (próba)")
     p.add_argument("--pomin", action="append", default=[], help="lista id do pominięcia w obu krokach (np. asr/usun.txt)")
     p.add_argument("--usun-procent", type=float, help="wybierz: najgorsze N%% według UTMOS")
