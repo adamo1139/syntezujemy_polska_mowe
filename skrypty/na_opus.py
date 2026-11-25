@@ -9,10 +9,15 @@ Kolejność (bezpieczna przy przerwaniu w dowolnym momencie):
      (audio -> .ogg, format „opus”, kbps) zapisany przez plik tymczasowy;
   4. usunięcie plików FLAC (chyba że --zostaw-flac).
 
+--pomin LISTA (np. utmos/usun_razem.txt po czysc_asr.py i czysc_utmos.py): klipy z listy nie są przekodowywane;
+ich wpisy trafiają z manifestu do manifest.odrzucone.jsonl, a ich pliki (FLAC i ewentualny .ogg) są usuwane
+(chyba że --zostaw-flac). Dzięki temu najpierw filtr, potem konwersja tylko tego, co zostaje.
+
 Nie uruchamiać, gdy generuj.py jeszcze pisze do tego samego katalogu.
 
   python skrypty/na_opus.py wyniki/partia2                # wszystkie rdzenie, 128 kbit/s
   python skrypty/na_opus.py wyniki/partia2 --procesy 20 --zostaw-flac
+  python skrypty/na_opus.py wyniki/partia2 --pomin wyniki/partia2/utmos/usun_razem.txt
 """
 
 from __future__ import annotations
@@ -59,24 +64,30 @@ def main() -> None:
     p.add_argument("katalog", help="katalog syntezy (manifest.jsonl + audio/)")
     p.add_argument("--kbps", type=int, default=128)
     p.add_argument("--procesy", type=int, default=os.cpu_count())
-    p.add_argument("--zostaw-flac", action="store_true", help="nie usuwaj plików FLAC po przekodowaniu")
+    p.add_argument("--zostaw-flac", action="store_true", help="nie usuwaj plików FLAC (ani plików odrzuconych klipów)")
+    p.add_argument("--pomin", action="append", default=[], help="lista id (jedno na wiersz) do odrzucenia zamiast konwersji")
     a = p.parse_args()
 
     k = Path(a.katalog)
     plik_manifestu = k / "manifest.jsonl"
     wiersze = [json.loads(l) for l in plik_manifestu.open(encoding="utf-8") if l.strip()]
+    pomin = {l.strip() for f in a.pomin for l in open(f, encoding="utf-8") if l.strip()}
+    odrzucone = [w for w in wiersze if w.get("id") in pomin]
+    wiersze = [w for w in wiersze if w.get("id") not in pomin]
+    if pomin:
+        print(f"--pomin: {len(pomin)} id na liście, z czego w manifeście {len(odrzucone)} — bez konwersji, do usunięcia", flush=True)
     do_zrobienia = [w for w in wiersze if "audio" in w and w["audio"].endswith(".flac")]
     juz_opus = sum(1 for w in wiersze if "audio" in w and w["audio"].endswith(".ogg"))
     print(f"{len(wiersze)} wpisów: FLAC do przekodowania {len(do_zrobienia)}, już w Opus {juz_opus}; "
           f"{a.procesy} procesów, {a.kbps} kbit/s", flush=True)
-    if not do_zrobienia:
+    if not do_zrobienia and not odrzucone:
         print("Nic do zrobienia.")
         return
 
     zadania = [(str(k / w["audio"]), str(k / w["audio"])[:-5] + ".ogg", a.kbps) for w in do_zrobienia]
     sek = sum(float(w.get("sekundy") or 0) for w in do_zrobienia)
     t0, gotowe, nowe, bledy = time.time(), 0, 0, []
-    with ProcessPoolExecutor(a.procesy) as pula:
+    with ProcessPoolExecutor(max(1, a.procesy)) as pula:
         for flac, ok, opis in pula.map(koduj, zadania, chunksize=64):
             gotowe += 1
             if not ok:
@@ -101,6 +112,12 @@ def main() -> None:
     for w in do_zrobienia:
         w["audio"] = w["audio"][:-5] + ".ogg"
         w["format"], w["kbps"] = "opus", a.kbps
+    if odrzucone:   # najpierw zapis odrzuconych (dopisywany), potem nowy manifest bez nich
+        with (k / "manifest.odrzucone.jsonl").open("a", encoding="utf-8") as f:
+            for w in odrzucone:
+                f.write(json.dumps(w, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
     tmp = plik_manifestu.with_suffix(".jsonl.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         for w in wiersze:
@@ -108,7 +125,8 @@ def main() -> None:
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, plik_manifestu)
-    print(f"Manifest zaktualizowany ({len(do_zrobienia)} klipów -> .ogg); kopia: {kopia}")
+    print(f"Manifest zaktualizowany ({len(do_zrobienia)} klipów -> .ogg, {len(odrzucone)} odrzuconych "
+          f"-> manifest.odrzucone.jsonl); kopia: {kopia}")
 
     if not a.zostaw_flac:
         zwolnione = 0
@@ -118,7 +136,16 @@ def main() -> None:
                 os.remove(flac)
             except FileNotFoundError:
                 pass
-        print(f"Usunięto {len(zadania)} plików FLAC, zwolniono {zwolnione / 1e9:.1f} GB.")
+        for w in odrzucone:
+            sciezka = str(k / w["audio"])
+            for plik in {sciezka, sciezka.rsplit(".", 1)[0] + ".ogg", sciezka.rsplit(".", 1)[0] + ".flac"}:
+                try:
+                    zwolnione += os.path.getsize(plik)
+                    os.remove(plik)
+                except FileNotFoundError:
+                    pass
+        print(f"Usunięto {len(zadania)} plików FLAC i pliki {len(odrzucone)} odrzuconych klipów, "
+              f"zwolniono {zwolnione / 1e9:.1f} GB.")
     print(f"Gotowe: {sek / 3600:.1f} h audio w {(time.time() - t0) / 60:.1f} min.")
 
 

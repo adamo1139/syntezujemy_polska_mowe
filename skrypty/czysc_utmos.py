@@ -12,6 +12,8 @@ brzmienie (szum, przester, metaliczność, „pływający” głos), którego AS
            PLIK łączy ją z listą z ASR (usun.txt z czysc_asr.py ocen) w jedną. Wynik: usun.txt (sam UTMOS),
            usun_razem.txt (ASR + UTMOS, gdy --asr), raport.txt (rozkład, progi, ile wspólnych z ASR)
            i --probki N najgorszych klipów skopiowanych do <praca>/probki/ do odsłuchu.
+  --pomin LISTA (np. asr/usun.txt): te klipy są pomijane w obu krokach — UTMOS liczony tylko na tym, co zostało po
+  ASR, a procent w „wybierz” liczony od klipów, które zostały.
   Usunięcie z danych: python skrypty/przygotuj_audio.py --zastap KATALOG --usun KATALOG/utmos/usun_razem.txt
 
 Środowisko: torch + torchaudio (np. środowisko treningowe trening/.venv). Przykład (karty 1,2,3,5,6,7):
@@ -47,6 +49,10 @@ def wyniki_oceny(praca: Path) -> dict[str, dict]:
     return out
 
 
+def wczytaj_pomin(args) -> set[str]:
+    return {l.strip() for f in args.pomin for l in open(f, encoding="utf-8") if l.strip()}
+
+
 def krok_ocen_na_kartach(args) -> None:
     karty = [k.strip() for k in args.karty.split(",") if k.strip()]
     praca = Path(args.praca or Path(args.katalog) / "utmos")
@@ -56,11 +62,14 @@ def krok_ocen_na_kartach(args) -> None:
         polecenie = [sys.executable, __file__, "ocen", args.katalog, "--praca", str(praca), "--czesc", f"{i}/{len(karty)}"]
         if args.limit:
             polecenie += ["--limit", str(args.limit)]
+        for f in args.pomin:
+            polecenie += ["--pomin", f]
         log = (praca / f"utmos_karta{karta}.log").open("w")
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": karta}
         procesy.append((karta, subprocess.Popen(polecenie, env=env, stdout=log, stderr=subprocess.STDOUT), log))
         print(f"karta {karta}: część {i}/{len(karty)}, log {praca / f'utmos_karta{karta}.log'}", flush=True)
-    wszystkich = len(wczytaj_manifest(Path(args.katalog)))
+    pomin = wczytaj_pomin(args)
+    wszystkich = sum(1 for w in wczytaj_manifest(Path(args.katalog)) if w["id"] not in pomin)
     try:
         ostatnio = time.time()
         while any(p.poll() is None for _, p, _ in procesy):
@@ -94,7 +103,9 @@ def krok_ocen(args) -> None:
     k, n = (int(x) for x in args.czesc.split("/"))
     plik = praca / f"utmos_{k}_z_{n}.jsonl"
     gotowe = gotowe_id(plik)
-    klipy = [w for w in wczytaj_manifest(katalog) if czesc_klipu(w["id"], n) == k and w["id"] not in gotowe]
+    pomin = wczytaj_pomin(args)
+    klipy = [w for w in wczytaj_manifest(katalog)
+             if czesc_klipu(w["id"], n) == k and w["id"] not in gotowe and w["id"] not in pomin]
     if args.limit:
         klipy = klipy[: args.limit]
     if klipy and not (katalog / klipy[0]["audio"]).is_file():
@@ -122,7 +133,10 @@ def krok_wybierz(args) -> None:
     katalog = Path(args.katalog)
     praca = Path(args.praca or katalog / "utmos")
     oceny = wyniki_oceny(praca)
-    manifest = {w["id"]: w for w in wczytaj_manifest(katalog)}
+    pomin = wczytaj_pomin(args)
+    manifest = {w["id"]: w for w in wczytaj_manifest(katalog) if w["id"] not in pomin}
+    if pomin:
+        print(f"--pomin: {len(pomin)} klipów pominiętych (np. odrzuconych przez ASR); liczę z {len(manifest)}")
     bez_oceny = [i for i in manifest if i not in oceny or oceny[i]["utmos"] is None]
     if len(bez_oceny) > 0.05 * len(manifest):
         sys.exit(f"{len(bez_oceny)} z {len(manifest)} klipów nie ma oceny UTMOS — najpierw dokończ krok „ocen”.")
@@ -173,6 +187,7 @@ def main() -> None:
     p.add_argument("--karty", help="ocen: numery kart po przecinku, po jednym procesie na kartę")
     p.add_argument("--czesc", default="0/1", help="K/N: tylko ta część zbioru (używane wewnętrznie przez --karty)")
     p.add_argument("--limit", type=int, help="ocen: tylko N klipów (próba)")
+    p.add_argument("--pomin", action="append", default=[], help="lista id do pominięcia w obu krokach (np. asr/usun.txt)")
     p.add_argument("--usun-procent", type=float, help="wybierz: najgorsze N%% według UTMOS")
     p.add_argument("--prog", type=float, help="wybierz: usuń klipy z UTMOS poniżej tej wartości")
     p.add_argument("--asr", help="wybierz: usun.txt z czysc_asr.py — połącz z listą UTMOS w usun_razem.txt")
