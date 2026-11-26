@@ -128,6 +128,8 @@ def main() -> None:
                    help="katalog ponownej syntezy: klipy o tych samych id dostają nowe audio (podział bez zmian)")
     p.add_argument("--usun", action="append", default=[],
                    help="plik z id klipów do usunięcia z danych (po jednym w wierszu, np. usun.txt z czysc_asr.py)")
+    p.add_argument("--val-wygrywa", action="store_true",
+                   help="--dodaj-val: klipy treningowe z tych samych rozmów co walidacja są usuwane z treningu (zamiast przerwania)")
     p.add_argument("--podzial-z", metavar="METADANE",
                    help="przypisz klipom podział (train/val) ich rozmów z innego metadane.jsonl, np. sprzed przebudowy")
     p.add_argument("--dodaj-val", action="append", default=[], metavar="NAZWA=KATALOG",
@@ -218,10 +220,18 @@ def main() -> None:
         if not nazwa or not katalog or not nazwa.replace("_", "").isalnum():
             sys.exit(f"--dodaj-val {wpis!r}: oczekiwane NAZWA=KATALOG (nazwa z liter, cyfr i _)")
         nowe = [w for w in z_plikow(Path(katalog)) if w["id"] not in znane]
-        zajete = {str(w["zrodlo_id"]) for w in wiersze}
-        kolizje = sum(1 for w in nowe if str(w["zrodlo_id"]) in zajete)
-        if kolizje:
-            sys.exit(f"{katalog}: {kolizje} klipów z rozmów, które już są w danych — wybierz teksty z --pomin wszystkich wcześniejszych wyborów")
+        wspolne = {str(w["zrodlo_id"]) for w in nowe} & {str(w["zrodlo_id"]) for w in wiersze}
+        if wspolne:
+            poza_treningiem = {str(w["zrodlo_id"]) for w in wiersze if w["podzial"] != "train"} & wspolne
+            if poza_treningiem or not args.val_wygrywa:
+                sys.exit(f"{katalog}: {sum(str(w['zrodlo_id']) in wspolne for w in nowe)} klipów z {len(wspolne)} rozmów, "
+                         "które już są w danych"
+                         + (f" (w tym {len(poza_treningiem)} w innej walidacji)" if poza_treningiem else
+                            " (w treningu) — --val-wygrywa usuwa je z treningu, albo wybierz teksty z --pomin"))
+            z_treningu = [w for w in wiersze if str(w["zrodlo_id"]) in wspolne]
+            wiersze = [w for w in wiersze if str(w["zrodlo_id"]) not in wspolne]
+            print(f"--val-wygrywa: z treningu usunięte {len(z_treningu)} klipów "
+                  f"({sum(w['sekundy'] for w in z_treningu) / 3600:.2f} h) z {len(wspolne)} rozmów walidacji val_{nazwa}")
         for w in nowe:
             w["podzial"] = f"val_{nazwa}"
             znane.add(w["id"])
