@@ -142,7 +142,7 @@ def karta(repo: str, wiersze: list[dict], czestotliwosc: int, zrodlo_tekstow: st
     format_audio = "Ogg Opus" if str(wiersze[0]["_sciezka"]).endswith(".ogg") else "FLAC"
     if opis_filtra:   # własny opis z pliku (--opis-filtra); {usuniete}, {procent}, {godziny_usuniete} wstawiane tu
         opis_filtra = opis_filtra.strip().format(
-            usuniete=usuniete, procent=f"{100 * usuniete / (usuniete + len(wiersze)):.0f}")
+            usuniete=usuniete, wszystkich=usuniete + len(wiersze), procent=f"{100 * usuniete / (usuniete + len(wiersze)):.0f}")
     elif usuniete:
         opis_filtra = (
             f"**Zbiór po filtrze ASR.** Usunięto {usuniete} klipów ({100 * usuniete / (usuniete + len(wiersze)):.0f}%) "

@@ -1,4 +1,4 @@
-**Zbiór po dwóch filtrach jakości.** Z ok. 2470 h syntezy (887 347 klipów) usunięto {usuniete} klipów ({procent}%):
+**Zbiór po dwóch filtrach jakości.** Z {wszystkich} klipów syntezy usunięto {usuniete} ({procent}%):
 
 1. **ASR.** Każdy klip przepisał [Parakeet Ultra](https://huggingface.co/moondream/parakeet-ultra), a tekst
    podany modelowi i transkrypcję porównano po normalizacji liczb (Morfeusz 2). Odpadło 15% klipów o najwyższym
