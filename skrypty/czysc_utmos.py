@@ -89,7 +89,7 @@ def krok_ocen_na_kartach(args) -> None:
         sys.exit(f"Procesy na kartach {', '.join(nieudane)} skończyły się błędem — zobacz logi w {praca}. "
                  "To samo polecenie wznowi pracę.")
     print(f"Ocenionych razem: {len(wyniki_oceny(praca))} z {wszystkich} klipów.")
-    print(f"Gotowe. Dalej: python {Path(__file__).relative_to(KATALOG_PROJEKTU)} wybierz {args.katalog} --usun-procent 10")
+    print(f"Gotowe. Dalej: python {Path(__file__).relative_to(KATALOG_PROJEKTU)} wybierz {args.katalog} --prog 2.75 (albo --usun-procent N)")
 
 
 def krok_ocen(args) -> None:
@@ -197,8 +197,8 @@ def main() -> None:
     p.add_argument("--praca", help="katalog wyników (domyślnie <katalog>/utmos)")
     p.add_argument("--karty", help="ocen: numery kart po przecinku, po jednym procesie na kartę")
     p.add_argument("--czesc", default="0/1", help="K/N: tylko ta część zbioru (używane wewnętrznie przez --karty)")
-    p.add_argument("--na-karte", type=int, default=4,
-                   help="ocen: procesy na kartę (każdy ocenia po jednym klipie; kilka naraz lepiej zapełnia GPU)")
+    p.add_argument("--na-karte", type=int, default=3,
+                   help="ocen: procesy na kartę (każdy ok. 3,7 GB RAM; 4 x 7 kart nie mieści się w 94 GB)")
     p.add_argument("--limit", type=int, help="ocen: tylko N klipów (próba)")
     p.add_argument("--pomin", action="append", default=[], help="lista id do pominięcia w obu krokach (np. asr/usun.txt)")
     p.add_argument("--usun-procent", type=float, help="wybierz: najgorsze N%% według UTMOS")
