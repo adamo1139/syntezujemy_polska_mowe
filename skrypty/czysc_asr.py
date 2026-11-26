@@ -393,6 +393,16 @@ def krok_ocen(args) -> None:
             o["powody"] = [f"najgorsze {args.usun_procent:g}% (cer {o['cer']:.2f})"]
         print(f"Usuwam najgorsze {args.usun_procent:g}% według CER: {ile} klipów, granica CER {usun[-1]['cer']:.3f}")
 
+    if args.usun_cer is not None:  # prosto: wszystko powyżej progu CER (np. granica z innego zbioru)
+        kolejnosc = sorted(oceny, key=lambda o: -o["cer"])
+        usun = [o for o in kolejnosc if o["cer"] > args.usun_cer]
+        odsluch = kolejnosc[len(usun):len(usun) + 200]
+        for o in oceny:
+            o["powody"] = []
+        for o in usun:
+            o["powody"] = [f"cer {o['cer']:.3f} > {args.usun_cer:g}"]
+        print(f"Usuwam CER > {args.usun_cer:g}: {len(usun)} klipów ({100 * len(usun) / len(oceny):.1f}%)")
+
     with (praca / "oceny.jsonl").open("w", encoding="utf-8") as plik:
         for o in oceny:
             plik.write(json.dumps(o, ensure_ascii=False) + "\n")
@@ -429,7 +439,7 @@ def krok_ocen(args) -> None:
         katalog_probek = praca / "probki"
         shutil.rmtree(katalog_probek, ignore_errors=True)
         katalog_probek.mkdir()
-        if args.usun_procent:  # klipy po obu stronach granicy: ostatnie usunięte i pierwsze zostawione
+        if args.usun_procent or args.usun_cer is not None:  # klipy po obu stronach granicy: ostatnie usunięte i pierwsze zostawione
             wybrane = usun[-(args.probki // 2):] + odsluch[: args.probki - args.probki // 2]
         else:
             wybrane = sorted(usun, key=lambda o: -o["cer"])[: args.probki // 2]
@@ -466,6 +476,8 @@ def main() -> None:
                    help="klipy bez transkrypcji (ASR się nie udał, np. przester) też do usun.txt")
     o.add_argument("--usun-procent", type=float,
                    help="usuń po prostu najgorsze N%% klipów według CER (zamiast progów poniżej)")
+    o.add_argument("--usun-cer", type=float,
+                   help="usuń po prostu klipy z CER powyżej tej wartości (zamiast progów poniżej i --usun-procent)")
     o.add_argument("--max-cer", type=float, default=0.25, help="powyżej: usuń")
     o.add_argument("--max-dziura", type=int, default=12,
                    help="tyle znaków niezgodności w jednym miejscu (bełkot, pominięty fragment): usuń")
