@@ -96,7 +96,18 @@ def czesc_klipu(id_: str, n: int) -> int:
 def gotowe_id(sciezka: Path) -> set[str]:
     if not sciezka.is_file():
         return set()
-    return {json.loads(w)["id"] for w in sciezka.open(encoding="utf-8") if w.strip()}
+    wynik = set()
+    for w in sciezka.open(encoding="utf-8"):
+        try:   # ostatnia linia może być ucięta przy przerwaniu albo w trakcie dopisywania
+            wynik.add(json.loads(w)["id"])
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return wynik
+
+
+def gotowe_wszystkie(praca: Path, wzorzec: str) -> set[str]:
+    """Id gotowe we wszystkich plikach części, także z innego podziału (np. wcześniej 6 kart, teraz 7)."""
+    return set().union(*(gotowe_id(p) for p in praca.glob(wzorzec)))
 
 
 # ------------------------------------------------------------------------------------------------ ASR
@@ -120,7 +131,7 @@ def krok_asr_na_kartach(args) -> None:
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": karta}
         procesy.append((karta, subprocess.Popen(polecenie, env=env, stdout=log, stderr=subprocess.STDOUT), log))
         print(f"karta {karta}: część {i}/{len(karty)}, log {praca / f'asr_karta{karta}.log'}", flush=True)
-    policz = lambda: sum(sum(1 for _ in f.open(encoding="utf-8")) for f in praca.glob("asr_*_z_*.jsonl"))   # noqa: E731
+    policz = lambda: len(gotowe_wszystkie(praca, "asr_*_z_*.jsonl"))   # noqa: E731  (unikalne id, bez powtórek)
     wszystkich = len(wczytaj_manifest(Path(args.katalog)))
     na_starcie = policz()
     print(f"Do zrobienia: {wszystkich - na_starcie} z {wszystkich} klipów ({na_starcie} już gotowych)", flush=True)
@@ -157,7 +168,7 @@ def krok_asr(args) -> None:
     praca.mkdir(parents=True, exist_ok=True)
     k, n = (int(x) for x in args.czesc.split("/"))
     wyjscie = praca / f"asr_{k}_z_{n}.jsonl"
-    gotowe = gotowe_id(wyjscie)
+    gotowe = gotowe_wszystkie(praca, "asr_*_z_*.jsonl")
     klipy = [w for w in wczytaj_manifest(katalog) if czesc_klipu(w["id"], n) == k and w["id"] not in gotowe]
     if klipy and not (katalog / klipy[0]["audio"]).is_file():
         sys.exit(f"Nie ma pliku audio {katalog / klipy[0]['audio']} — manifest jest, ale nagrań w {katalog} brak. "
