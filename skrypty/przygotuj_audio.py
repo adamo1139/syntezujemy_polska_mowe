@@ -128,6 +128,8 @@ def main() -> None:
                    help="katalog ponownej syntezy: klipy o tych samych id dostają nowe audio (podział bez zmian)")
     p.add_argument("--usun", action="append", default=[],
                    help="plik z id klipów do usunięcia z danych (po jednym w wierszu, np. usun.txt z czysc_asr.py)")
+    p.add_argument("--podzial-z", metavar="METADANE",
+                   help="przypisz klipom podział (train/val) ich rozmów z innego metadane.jsonl, np. sprzed przebudowy")
     p.add_argument("--dodaj-val", action="append", default=[], metavar="NAZWA=KATALOG",
                    help="dodatkowy zbiór walidacyjny: klipy z KATALOG -> dane/bluetts_val_NAZWA.csv")
     args = p.parse_args()
@@ -156,6 +158,20 @@ def main() -> None:
     identyfikatory = [w["id"] for w in wiersze]
     if len(set(identyfikatory)) != len(identyfikatory):
         sys.exit("Powtarzające się id klipów.")
+
+    if args.podzial_z:   # ten sam podział rozmów co w starych danych (np. przebudowa z Opus po czyszczeniu)
+        stary = {}
+        for linia in open(args.podzial_z, encoding="utf-8"):
+            if linia.strip():
+                w = json.loads(linia)
+                stary.setdefault(str(w["zrodlo_id"]), w["podzial"])
+        bez = sum(1 for w in wiersze if str(w["zrodlo_id"]) not in stary)
+        if bez:
+            sys.exit(f"--podzial-z: {bez} klipów z rozmów, których nie ma w {args.podzial_z} — to inne dane niż poprzednio")
+        for w in wiersze:
+            w["podzial"] = stary[str(w["zrodlo_id"])]
+        print(f"Podział rozmów z {args.podzial_z}: walidacja {len({w['zrodlo_id'] for w in wiersze if w['podzial'] == 'val'})} "
+              f"rozmów, {sum(w['podzial'] == 'val' for w in wiersze)} klipów")
 
     # Walidacja: rozmowy o najmniejszym skrócie zrodlo_id — stały, niezależny od kolejności wybór.
     # Klipy z wcześniejszych metadanych zachowują swój podział (dodanie danych nie przesuwa walidacji).
