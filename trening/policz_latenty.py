@@ -65,13 +65,40 @@ def partie_gpu(moje, sciezki, sr, porcja, device, rozmiar):
     import cupy as cp
     from opus_gpu import decode_many
     cp.cuda.Device(device.index).use()
-    plaskie = [i for p in moje for i in p if sciezki[i].lower().endswith((".ogg", ".opus"))]
-    strumien = decode_many((sciezki[i] for i in plaskie), backend="cuda", output="cupy", batch_size=rozmiar)
+    plaskie = [sciezki[i] for p in moje for i in p if sciezki[i].lower().endswith((".ogg", ".opus"))]
+
+    def odporny():
+        """decode_many po kolei; plik, którego czytnik Ogg opus_gpu nie przyjmie, daje None (dekoduje go wtedy
+        soundfile), a dekodowanie rusza od nowa od tej samej grupy bez niego."""
+        poz, zle = 0, set()
+        while poz < len(plaskie):
+            reszta = [s for s in plaskie[poz:] if s not in zle]
+            try:
+                for sciezka, pcm in decode_many(reszta, backend="cuda", output="cupy", batch_size=rozmiar):
+                    while plaskie[poz] in zle:   # pominięte wcześniej: na swoim miejscu None
+                        poz += 1
+                        yield None
+                    if str(sciezka) != plaskie[poz]:
+                        raise RuntimeError(f"opus_gpu: kolejność się rozjechała ({sciezka} zamiast {plaskie[poz]})")
+                    poz += 1
+                    yield pcm
+                while poz < len(plaskie) and plaskie[poz] in zle:
+                    poz += 1
+                    yield None
+                return
+            except ValueError as blad:
+                zly = str(blad).split(": ", 1)[0]
+                if zly not in plaskie or zly in zle:
+                    raise
+                print(f"  opus_gpu nie czyta {zly} ({blad.__cause__ or blad}); ten plik przez soundfile", flush=True)
+                zle.add(zly)
+
+    strumien = odporny()
     for p in moje:
         xs = []
         for i in p:
-            if sciezki[i].lower().endswith((".ogg", ".opus")):
-                _, pcm = next(strumien)
+            pcm = next(strumien) if sciezki[i].lower().endswith((".ogg", ".opus")) else None
+            if pcm is not None:
                 x = torch.from_dlpack(pcm).to(torch.float32).mean(dim=1) / 32768.0
                 # pcm to widok na bufor dekodera, który kolejna grupa nadpisze: kopia musi się skończyć, zanim
                 # generator ruszy dalej (inaczej latenty z cudzego audio)
@@ -79,7 +106,11 @@ def partie_gpu(moje, sciezki, sr, porcja, device, rozmiar):
                 if sr != 48000:
                     x = ensure_sr(x, 48000, sr, device=device).reshape(-1)
             else:
-                _, x = Klipy(sciezki, sr)[i]
+                try:
+                    _, x = Klipy(sciezki, sr)[i]
+                except Exception as blad:
+                    raise SystemExit(f"Nie da się odczytać {sciezki[i]} ani przez opus_gpu, ani przez soundfile ({blad}). "
+                                     "Usuń ten klip z danych (przygotuj_audio.py --usun) i policz latenty od nowa.")
                 x = x.to(device)
             xs.append(x)
         n = max(-(-x.shape[0] // porcja) * porcja for x in xs)
