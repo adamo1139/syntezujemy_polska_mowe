@@ -99,6 +99,42 @@ def zaplanuj_pliki(katalog: Path, wiersze: list[dict], mb_na_plik: int) -> list[
     return pliki
 
 
+def wybrane_klipy(wyniki: Path, usun: list[str]) -> tuple[list[dict], int]:
+    """Wpisy manifestu, które trafią do paczek (po --usun), i liczba wszystkich przed filtrem."""
+    wiersze = [json.loads(w) for w in (wyniki / "manifest.jsonl").open(encoding="utf-8") if w.strip()]
+    wszystkich = len(wiersze)
+    if usun:
+        do_usuniecia = {w.strip() for plik in usun for w in Path(plik).read_text(encoding="utf-8").splitlines() if w.strip()}
+        wiersze = [w for w in wiersze if w["id"] not in do_usuniecia]
+    return wiersze, wszystkich
+
+
+def odcisk(wiersze: list[dict]) -> str:
+    import hashlib
+    return hashlib.sha1("".join(sorted(f"{w['id']}\t{w.get('audio')}\n" for w in wiersze)).encode()).hexdigest()
+
+
+def sprawdz_odcisk(paczki: Path, wiersze: list[dict]) -> None:
+    """Paczki z innej wersji danych (np. FLAC sprzed na_opus, inny filtr) nie mogą być wysłane ani dopakowane."""
+    plik = paczki / "zrodlo.txt"
+    teraz = odcisk(wiersze)
+    if not list((paczki / "data").glob("*.parquet*")):
+        paczki.mkdir(parents=True, exist_ok=True)
+        plik.write_text(teraz + "\n", encoding="utf-8")
+        return
+    if plik.is_file():
+        zgodne = plik.read_text(encoding="utf-8").strip() == teraz
+    else:   # paczki sprzed odcisków: porównanie formatu i liczby klipów z karty
+        karta_txt = (paczki / "README.md").read_text(encoding="utf-8") if (paczki / "README.md").is_file() else ""
+        format_teraz = "Ogg Opus" if str(wiersze[0].get("audio", "")).endswith(".ogg") else "FLAC"
+        zgodne = f" {len(wiersze)} klipów," in karta_txt and f"mono ({format_teraz})" in karta_txt
+        if zgodne:
+            plik.write_text(teraz + "\n", encoding="utf-8")
+    if not zgodne:
+        sys.exit(f"W {paczki} leżą paczki z innej wersji danych (inne klipy albo format, np. FLAC sprzed na_opus.py). "
+                 f"Usuń ten katalog (rm -r {paczki}) albo podaj inny --paczki i uruchom ponownie.")
+
+
 def paczki_kompletne(paczki: Path) -> int:
     """Liczba plików parquet, jeśli w katalogu leży pełny, dokończony zestaw i karta; inaczej 0."""
     dane = paczki / "data"
@@ -315,9 +351,11 @@ def main() -> None:
     # zbiór po filtrze ma własny katalog paczek, żeby nie mieszać się z surowym
     paczki = Path(args.paczki) if args.paczki else wyniki.with_name(wyniki.name + ("_czyste_parquet" if args.usun else "_parquet"))
 
+    if not args.tylko_wyslij:
+        sprawdz_odcisk(paczki, wybrane_klipy(wyniki, args.usun)[0])
     gotowe = paczki_kompletne(paczki)
     if gotowe and not args.tylko_wyslij:
-        print(f"Dane już spakowane: {gotowe} plików parquet i karta w {paczki} — nie pakuję od nowa.")
+        print(f"Dane już spakowane: {gotowe} plików parquet i karta w {paczki}, z tych samych klipów — nie pakuję od nowa.")
         print("  (żeby spakować ponownie, usuń ten katalog)")
     elif not args.tylko_wyslij:
         import soundfile as sf
