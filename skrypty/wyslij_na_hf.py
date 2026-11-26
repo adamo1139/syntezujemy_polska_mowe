@@ -48,8 +48,36 @@ KOLUMNY = [
 KOLUMNA_CYFRY = ("text_cyfry", "tekst_cyfry", "string", "string")
 
 
+# Oceny jakości z czysc_asr.py / czysc_utmos.py (dołączane, gdy obok manifestu leżą asr/oceny.jsonl, utmos/utmos_*.jsonl)
+KOLUMNY_OCEN = [("utmos", "utmos", "float32", "float32"), ("cer", "cer", "float32", "float32")]
+
+
 def kolumny(wiersze: list[dict]) -> list[tuple]:
-    return KOLUMNY + [KOLUMNA_CYFRY] if any("tekst_cyfry" in w for w in wiersze) else KOLUMNY
+    wynik = KOLUMNY + ([KOLUMNA_CYFRY] if any("tekst_cyfry" in w for w in wiersze) else [])
+    return wynik + [k for k in KOLUMNY_OCEN if any(w.get(k[1]) is not None for w in wiersze)]
+
+
+def dolacz_oceny(wyniki: Path, wiersze: list[dict]) -> None:
+    """Wpisuje do wierszy `utmos` i `cer` z plików ocen obok manifestu (brak oceny = None)."""
+    utmos, cer = {}, {}
+    for plik in sorted((wyniki / "utmos").glob("utmos_*_z_*.jsonl")):
+        for linia in plik.open(encoding="utf-8"):
+            try:
+                d = json.loads(linia)
+            except json.JSONDecodeError:
+                continue
+            utmos[d["id"]] = d.get("utmos")
+    oceny = wyniki / "asr" / "oceny.jsonl"
+    if oceny.is_file():
+        for linia in oceny.open(encoding="utf-8"):
+            if linia.strip():
+                d = json.loads(linia)
+                cer[d["id"]] = d.get("cer")
+    for w in wiersze:
+        w["utmos"], w["cer"] = utmos.get(w["id"]), cer.get(w["id"])
+    if utmos or cer:
+        print(f"Oceny: UTMOS dla {sum(w['utmos'] is not None for w in wiersze)}, CER dla "
+              f"{sum(w['cer'] is not None for w in wiersze)} z {len(wiersze)} klipów")
 
 
 def wczytaj_manifest(katalog: Path) -> list[dict]:
@@ -111,7 +139,8 @@ def wybrane_klipy(wyniki: Path, usun: list[str]) -> tuple[list[dict], int]:
 
 def odcisk(wiersze: list[dict]) -> str:
     import hashlib
-    return hashlib.sha1("".join(sorted(f"{w['id']}\t{w.get('audio')}\n" for w in wiersze)).encode()).hexdigest()
+    nazwy = ",".join(k[0] for k in kolumny(wiersze))   # nowa kolumna (np. utmos) = paczki do zrobienia od nowa
+    return hashlib.sha1((nazwy + "\n" + "".join(sorted(f"{w['id']}\t{w.get('audio')}\n" for w in wiersze))).encode()).hexdigest()
 
 
 def sprawdz_odcisk(paczki: Path, wiersze: list[dict]) -> None:
@@ -127,7 +156,8 @@ def sprawdz_odcisk(paczki: Path, wiersze: list[dict]) -> None:
     else:   # paczki sprzed odcisków: porównanie formatu i liczby klipów z karty
         karta_txt = (paczki / "README.md").read_text(encoding="utf-8") if (paczki / "README.md").is_file() else ""
         format_teraz = "Ogg Opus" if str(wiersze[0].get("audio", "")).endswith(".ogg") else "FLAC"
-        zgodne = f" {len(wiersze)} klipów," in karta_txt and f"mono ({format_teraz})" in karta_txt
+        zgodne = (f" {len(wiersze)} klipów," in karta_txt and f"mono ({format_teraz})" in karta_txt
+                  and all(f"| `{k[0]}` |" in karta_txt for k in kolumny(wiersze)))
         if zgodne:
             plik.write_text(teraz + "\n", encoding="utf-8")
     if not zgodne:
@@ -214,6 +244,10 @@ def karta(repo: str, wiersze: list[dict], czestotliwosc: int, zrodlo_tekstow: st
         "cyfry. Zamianę zrobił regułowy normalizator `liczby/normalizuj.py` (Morfeusz 2, bez LLM). Kolumna "
         "`text_cyfry` ma oryginalny zapis z cyframi."
         if slownie else "Liczby i skróty są w formie surowej (bez normalizacji).")
+    nazwy_kolumn = {k[0] for k in kolumny(wiersze)}
+    wiersze_ocen = (("\n| `utmos` | ocena naturalności UTMOS22 strong (ok. 1–5; wyższa = lepiej) |" if "utmos" in nazwy_kolumn else "")
+                    + ("\n| `cer` | błąd znakowy między `text` a transkrypcją Parakeet Ultra, po normalizacji liczb |"
+                       if "cer" in nazwy_kolumn else ""))
     wiersz_cyfry = "\n| `text_cyfry` | ten sam tekst w oryginalnym zapisie, z cyframi i skrótami |" if slownie else ""
     return f"""---
 license: apache-2.0
@@ -265,7 +299,7 @@ Zbiór powstał do trenowania małych polskich modeli TTS (destylacja z VoxCPM2)
 | `temat` | temat rozmowy |
 | `czesc` | część zbioru ({len(czesci)} rozłącznych części o tym samym rozkładzie tematów; rozmowa zawsze w jednej) |
 | `jakosc` | ocena jakości rozmowy źródłowej |
-| `pytanie` | czy tekst kończy się znakiem zapytania |
+| `pytanie` | czy tekst kończy się znakiem zapytania |{wiersze_ocen}
 
 ## Długość klipów
 
@@ -352,7 +386,9 @@ def main() -> None:
     paczki = Path(args.paczki) if args.paczki else wyniki.with_name(wyniki.name + ("_czyste_parquet" if args.usun else "_parquet"))
 
     if not args.tylko_wyslij:
-        sprawdz_odcisk(paczki, wybrane_klipy(wyniki, args.usun)[0])
+        do_odcisku = wybrane_klipy(wyniki, args.usun)[0]
+        dolacz_oceny(wyniki, do_odcisku)
+        sprawdz_odcisk(paczki, do_odcisku)
     gotowe = paczki_kompletne(paczki)
     if gotowe and not args.tylko_wyslij:
         print(f"Dane już spakowane: {gotowe} plików parquet i karta w {paczki}, z tych samych klipów — nie pakuję od nowa.")
@@ -362,6 +398,7 @@ def main() -> None:
 
         t0 = time.time()
         wiersze = wczytaj_manifest(wyniki)
+        dolacz_oceny(wyniki, wiersze)
         wszystkich = len(wiersze)
         odrzucone_wczesniej = wyniki / "manifest.odrzucone.jsonl"   # klipy usunięte już przez na_opus.py --pomin
         if odrzucone_wczesniej.is_file():
