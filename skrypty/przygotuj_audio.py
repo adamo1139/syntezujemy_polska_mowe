@@ -165,9 +165,13 @@ def main() -> None:
             if linia.strip():
                 w = json.loads(linia)
                 stary.setdefault(str(w["zrodlo_id"]), w["podzial"])
-        bez = sum(1 for w in wiersze if str(w["zrodlo_id"]) not in stary)
-        if bez:
-            sys.exit(f"--podzial-z: {bez} klipów z rozmów, których nie ma w {args.podzial_z} — to inne dane niż poprzednio")
+        bez = [w for w in wiersze if str(w["zrodlo_id"]) not in stary]
+        if len(bez) > 0.01 * len(wiersze):
+            sys.exit(f"--podzial-z: {len(bez)} klipów z rozmów, których nie ma w {args.podzial_z} — to inne dane niż poprzednio")
+        if bez:   # rozmowy, których wszystkie klipy wypadły wcześniej (inny filtr): nie wiadomo, czy były w walidacji
+            print(f"--podzial-z: pomijam {len(bez)} klipów z {len({w['zrodlo_id'] for w in bez})} rozmów, których nie ma "
+                  f"w {args.podzial_z} (nie wiadomo, czy to trening, czy walidacja)")
+            wiersze = [w for w in wiersze if str(w["zrodlo_id"]) in stary]
         for w in wiersze:
             w["podzial"] = stary[str(w["zrodlo_id"])]
         print(f"Podział rozmów z {args.podzial_z}: walidacja {len({w['zrodlo_id'] for w in wiersze if w['podzial'] == 'val'})} "
