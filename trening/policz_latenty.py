@@ -59,6 +59,33 @@ def zloz(partia, porcja):
 
 
 
+def partie_gpu(moje, sciezki, sr, porcja, device, rozmiar):
+    """Jak DataLoader z `zloz`, ale klipy .ogg dekodowane przez opus_gpu na tej samej karcie, partiami po `rozmiar`
+    (następna grupa czyta się z dysku w tle); inne formaty przez soundfile. Wynik od razu na `device`."""
+    import cupy as cp
+    from opus_gpu import decode_many
+    cp.cuda.Device(device.index).use()
+    plaskie = [i for p in moje for i in p if sciezki[i].lower().endswith((".ogg", ".opus"))]
+    strumien = decode_many((sciezki[i] for i in plaskie), backend="cuda", output="cupy", batch_size=rozmiar)
+    for p in moje:
+        xs = []
+        for i in p:
+            if sciezki[i].lower().endswith((".ogg", ".opus")):
+                _, pcm = next(strumien)
+                x = torch.from_dlpack(pcm).to(torch.float32).mean(dim=1) / 32768.0
+                # pcm to widok na bufor dekodera, który kolejna grupa nadpisze: kopia musi się skończyć, zanim
+                # generator ruszy dalej (inaczej latenty z cudzego audio)
+                torch.cuda.current_stream(device).synchronize()
+                if sr != 48000:
+                    x = ensure_sr(x, 48000, sr, device=device).reshape(-1)
+            else:
+                _, x = Klipy(sciezki, sr)[i]
+                x = x.to(device)
+            xs.append(x)
+        n = max(-(-x.shape[0] // porcja) * porcja for x in xs)
+        yield p, torch.stack([F.pad(x, (0, n - x.shape[0])) for x in xs]), [x.shape[0] for x in xs]
+
+
 def licz(rank: int, z: dict) -> None:
     """Jeden proces na kartę: partie rank, rank + n, ... zapisywane do wspólnego pliku (memmap)."""
     device = torch.device(z["urzadzenia"][rank])
@@ -80,8 +107,11 @@ def licz(rank: int, z: dict) -> None:
 
     mm = np.load(z["plik"], mmap_mode="r+")
     przes, klatki = z["przes"], z["klatki"]
-    loader = DataLoader(Klipy(z["sciezki"], sr), batch_sampler=Partie(), num_workers=z["num_workers"],
-                        collate_fn=functools.partial(zloz, porcja=porcja))
+    if z["dekoder"] == "gpu":
+        loader = partie_gpu(moje, z["sciezki"], sr, porcja, device, z["gpu_partia"])
+    else:
+        loader = DataLoader(Klipy(z["sciezki"], sr), batch_sampler=Partie(), num_workers=z["num_workers"],
+                            collate_fn=functools.partial(zloz, porcja=porcja))
     with torch.no_grad():
         for nr, (idx, x, dl) in enumerate(loader, 1):
             x = x.to(device)
@@ -103,7 +133,11 @@ def main() -> None:
     p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu",
                    help="karta albo kilka po przecinku, np. cuda:1,cuda:2 (partie dzielone między nie)")
     p.add_argument("--sekund_na_partie", type=float, default=600.0, help="budżet dopełnionej długości partii")
-    p.add_argument("--num_workers", type=int, default=8, help="procesy wczytujące na każdą kartę")
+    p.add_argument("--num_workers", type=int, default=8, help="procesy wczytujące na każdą kartę (dekoder cpu)")
+    p.add_argument("--dekoder", choices=["auto", "cpu", "gpu"], default="auto",
+                   help="gpu: pliki .ogg dekodowane przez opus_gpu na karcie liczącej latenty; auto = gpu, gdy "
+                        "opus_gpu jest zainstalowane i liczymy na CUDA")
+    p.add_argument("--gpu_partia", type=int, default=1024, help="dekoder gpu: klipów w jednym wywołaniu dekodera")
     args = p.parse_args()
 
     cfg = json.load(open(args.config, encoding="utf-8"))
@@ -115,6 +149,11 @@ def main() -> None:
     porcja = hop * ccf
 
     urzadzenia = [d.strip() for d in args.device.split(",")]
+    if args.dekoder == "auto":
+        import importlib.util
+        args.dekoder = "gpu" if (all(d.startswith("cuda") for d in urzadzenia)
+                                 and importlib.util.find_spec("opus_gpu") and importlib.util.find_spec("cupy")) else "cpu"
+    print(f"Dekoder audio: {args.dekoder}")
     enc = LatentEncoder(cfg=ae["encoder"])
     enc.load_state_dict(torch.load(args.ae_checkpoint, map_location="cpu")["encoder"])
     odcisk = encoder_fingerprint(enc.state_dict())[:12]
@@ -154,6 +193,7 @@ def main() -> None:
     t0 = time.time()
     zadanie = dict(cfg=cfg, ae_checkpoint=args.ae_checkpoint, sciezki=sciezki, sr=sr, porcja=porcja, ccf=ccf,
                    partie=partie, przes=przes, klatki=klatki, plik=plik + ".tmp", num_workers=args.num_workers,
+                   dekoder=args.dekoder, gpu_partia=args.gpu_partia,
                    urzadzenia=urzadzenia, t0=t0)
     if len(urzadzenia) == 1:
         licz(0, zadanie)
