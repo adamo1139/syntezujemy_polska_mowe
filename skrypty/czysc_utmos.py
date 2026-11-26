@@ -168,9 +168,11 @@ def krok_wybierz(args) -> None:
         asr = {w.strip() for w in open(args.asr, encoding="utf-8") if w.strip()}
         razem = usun | asr
         (praca / "usun_razem.txt").write_text("".join(f"{i}\n" for i in sorted(razem)), encoding="utf-8")
-        raport.append(f"ASR ({args.asr}): {len(asr)} klipów; wspólnych z UTMOS: {len(usun & asr)}; "
-                      f"razem do usunięcia: {len(razem)} ({sek(razem & manifest.keys()):.1f} h, "
-                      f"{100 * len(razem) / len(manifest):.1f}%); zostaje {sek(manifest.keys() - razem):.1f} h")
+        caly = {w["id"]: w for w in wczytaj_manifest(katalog)}   # razem z klipami pominiętymi przez --pomin
+        h = lambda ids: sum(float(caly[i].get("sekundy") or 0) for i in ids if i in caly) / 3600   # noqa: E731
+        raport.append(f"ASR ({args.asr}): {len(asr)} klipów ({h(asr):.1f} h); UTMOS: {len(usun)} ({h(usun):.1f} h); "
+                      f"razem do usunięcia: {len(razem)} z {len(caly)} klipów ({100 * len(razem) / len(caly):.1f}%, "
+                      f"{h(razem):.1f} z {h(caly):.1f} h); zostaje {h(caly.keys() - razem):.1f} h")
     if args.probki or args.najlepsze:
         kat = praca / "probki"
         shutil.rmtree(kat, ignore_errors=True)
