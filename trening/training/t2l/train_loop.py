@@ -47,7 +47,6 @@ from training.t2l.cfg_utils import (
 from training.t2l.rsf import rsf_loss, rsf_negative_targets, silence_latent
 from training.t2l.sampling import build_reference_only, build_reference_from_latents, sample_audio, set_audio_format
 from training.t2l.spfm import spfm_forward_mask
-from training.t2l.sample_mos import score_checkpoint
 
 # --- periodic checkpoint log phrases (Hebrew IPA + espeak for other langs) ---
 
@@ -1263,8 +1262,7 @@ def train(
                 vf_estimator.train()
                 text_encoder.train()
                 reference_encoder.train(not freeze_reference)
-                scores = score_checkpoint(prompt_files, log_dir, global_step) if prompt_files else {}
-                metryki.audio(prompt_files + vc_files, global_step, ae_sample_rate, scores)
+                metryki.audio(prompt_files + vc_files, global_step, ae_sample_rate)
 
         # Flush remaining gradients if dataloader length is not divisible by accumulation_steps
         if num_batches % accumulation_steps != 0:

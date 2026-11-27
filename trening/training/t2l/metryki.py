@@ -107,13 +107,13 @@ class Metryki:
         if self.run is not None:
             self.run.log(dane, step=global_step)
 
-    def audio(self, files, global_step: int, sample_rate: int, scores: dict):
+    def audio(self, files, global_step: int, sample_rate: int):
         if self.run is None or not files:
             return
         prefix = f"step_{global_step}_"
         audio = {f"probki/{os.path.basename(path)[len(prefix):-4]}": self.wandb.Audio(path, sample_rate=sample_rate)
                  for path in files}
-        self.run.log({**audio, **scores}, step=global_step)
+        self.run.log(audio, step=global_step)
 
     def koniec(self):
         if self.run is not None:
