@@ -55,7 +55,8 @@ class Text2LatentDataset(Dataset):
         self.max_text_len = max_text_len
         self.default_lang = default_lang
         self.lang_tags = lang_tags
-        self.load_ref = load_ref
+        # Context windows may borrow text only. Take the voice reference from the target interval.
+        self.load_ref = load_ref and not context_chars
         self.context_chars = context_chars
         self.latents_dir = latents_dir
         self._lat_mm = None

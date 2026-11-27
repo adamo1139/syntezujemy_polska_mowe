@@ -67,9 +67,9 @@ rozdzial.wav,1,pl,True,Ktoś zapukał.,96000,192000
 rozdzial.wav,1,pl,True,Otworzyłam drzwi.,192000,312000
 ```
 
-`start_frame` jest włącznie, `end_frame` wyłącznie, oba w próbkach przy oryginalnej częstotliwości pliku. Granicę wyznacz między słowami, a pauzę uwzględnij dokładnie raz. Trener odczytuje tylko docelowy przedział i dobiera tekst bezpośrednio przyległych przedziałów z tego samego pliku i od tego samego mówcy. Kolejność wierszy jest dowolna. W polskim zbiorze znakowym `phonemized=True` pomija eSpeak. Przy podziale na trening i walidację trzymaj całe nagranie w jednym zbiorze.
+`start_frame` jest włącznie, `end_frame` wyłącznie, oba w próbkach przy oryginalnej częstotliwości pliku. Granicę wyznacz między słowami, a pauzę uwzględnij dokładnie raz. Trener odczytuje tylko docelowy przedział i dobiera tekst bezpośrednio przyległych przedziałów z tego samego pliku i od tego samego mówcy. Przy włączonym kontekście wzorzec głosu w treningu i walidacji pochodzi z wycinka tego samego celu. Sąsiedzi dostarczają wyłącznie tekst. Kolejność wierszy jest dowolna. W polskim zbiorze znakowym `phonemized=True` pomija eSpeak. Przy podziale na trening i walidację trzymaj całe nagranie w jednym zbiorze.
 
-Jeżeli przedziały są już zapisane jako osobne klipy, użyj `wav_path,text,speaker_id,lang,phonemized,left_context,right_context`. W tym wariancie można użyć `--latents` z latentami tych klipów. Puste pola oznaczają brak danego sąsiada.
+Jeżeli przedziały są już zapisane jako osobne klipy, użyj `wav_path,text,speaker_id,lang,phonemized,left_context,right_context`. W tym wariancie można użyć `--latents` z latentami tych klipów. Puste pola oznaczają brak danego sąsiada. Dla niezależnych klipów VoxCPM2 zostaw oba pola puste. Przykłady przejść przygotuj z ciągłych nagrań wielozdaniowych.
 
 Eksportuj model z tą samą konfiguracją co trening. Po wczytaniu wyeksportowanego modelu `MikolAI.synteza(tekst)` sama dobiera sąsiadów przed sortowaniem fragmentów do partii. Domyślnie zachowuje wygenerowane pauzy. Do odsłuchu bez eksportu użyj `syntezuj.py --akapit --tekst "Było już późno." --tekst "Ktoś zapukał."` razem ze zwykłymi opcjami `--config` i `--ckpt`. Wynik `akapit.wav` znajdziesz obok próbek dla danego ustawienia.
 
