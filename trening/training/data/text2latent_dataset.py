@@ -47,6 +47,7 @@ class Text2LatentDataset(Dataset):
         lang_tags: bool = False,          # '<lang>' + ids + '</lang>' (config key)
         load_ref: bool = True,            # False: bez drugiego klipu jako wzorca (zwracany jest ten sam klip)
         latents_dir: str | None = None,   # katalog z policz_latenty.py: zwracane są latenty [144, T] zamiast audio
+        context_chars: int = 0,
     ):
         self.sample_rate = sample_rate
         self.hop_length = hop_length
@@ -55,6 +56,7 @@ class Text2LatentDataset(Dataset):
         self.default_lang = default_lang
         self.lang_tags = lang_tags
         self.load_ref = load_ref
+        self.context_chars = context_chars
         self.latents_dir = latents_dir
         self._lat_mm = None
         if latents_dir:
@@ -100,6 +102,15 @@ class Text2LatentDataset(Dataset):
 
         # Drop empty text
         self.df = self.df.dropna(subset=['text'])
+
+        # Optional intervals in a continuous source recording, at its native sample rate.
+        self.segmented = bool({"start_frame", "end_frame"} & set(self.df.columns))
+        if self.segmented:
+            if not {"start_frame", "end_frame"} <= set(self.df.columns):
+                raise ValueError("Provide both start_frame and end_frame")
+            if latents_dir:
+                raise ValueError("Cached clip latents require distinct target files; use raw audio for source intervals")
+            self._index_intervals()
 
         # --- 2. Language setup ---
         if 'lang' not in self.df.columns:
@@ -174,7 +185,7 @@ class Text2LatentDataset(Dataset):
                 self.df = self.df[self.df['dur_sec'] * self.sample_rate <= self.max_wav_len].reset_index(drop=True)
         elif self.max_wav_len is not None:
             print(f"[Dataset] Filtering audio > {self.max_wav_len} samples...")
-            durs = self.df.apply(self._duration_sec, axis=1)
+            durs = self.df["dur_sec"] if self.segmented else self.df.apply(self._duration_sec, axis=1)
             self.df['dur_sec'] = durs   # do kubełków po długości (BucketBatchSampler)
             mask_wav = durs * self.sample_rate <= self.max_wav_len
             self.df = self.df[mask_wav].reset_index(drop=True)
@@ -264,6 +275,31 @@ class Text2LatentDataset(Dataset):
             return wav_name
         return os.path.join(self.wavs_dir, wav_name)
 
+    def _index_intervals(self):
+        for name in ("start_frame", "end_frame"):
+            values = pd.to_numeric(self.df[name], errors="raise")
+            if values.isna().any() or (values % 1 != 0).any():
+                raise ValueError(f"{name} must contain integer sample offsets")
+            self.df[name] = values.astype("int64")
+        if (self.df.start_frame < 0).any() or (self.df.end_frame <= self.df.start_frame).any():
+            raise ValueError("Invalid audio interval")
+        self.df = self.df.copy()
+        durations = {}
+        for wav, group in self.df.groupby("wav_path"):
+            info = sf.info(self._resolve_path(wav))
+            if group.end_frame.max() > info.frames:
+                raise ValueError(f"Interval extends beyond {wav}")
+            durations[wav] = info.samplerate
+        self.df["dur_sec"] = (self.df.end_frame - self.df.start_frame) / self.df.wav_path.map(durations)
+        if self.context_chars:
+            ordered = self.df.sort_values(["wav_path", "start_frame"])
+            for name, shift, edge, other in (("left_context", 1, "start_frame", "end_frame"),
+                                             ("right_context", -1, "end_frame", "start_frame")):
+                neighbor = ordered.shift(shift)
+                adjacent = ((ordered.wav_path == neighbor.wav_path) & (ordered.speaker_id == neighbor.speaker_id)
+                            & (ordered[edge] == neighbor[other]))
+                self.df[name] = neighbor.text.where(adjacent, "")
+
     def _duration_sec(self, row):
         """Długość klipu w sekundach z nagłówka pliku; 0.0, gdy pliku nie da się odczytać (jak _is_duration_ok: zostaje)."""
         try:
@@ -307,7 +343,8 @@ class Text2LatentDataset(Dataset):
         if not os.path.exists(wav_path):
             raise FileNotFoundError(f"File not found: {wav_path}")
 
-        wav_numpy, sr = sf.read(wav_path, dtype='float32')
+        interval = dict(start=int(row.start_frame), stop=int(row.end_frame)) if self.segmented else {}
+        wav_numpy, sr = sf.read(wav_path, dtype='float32', **interval)
         wav = torch.from_numpy(wav_numpy).float()
         
         # Stereo to Mono
@@ -375,7 +412,15 @@ class Text2LatentDataset(Dataset):
             ids = wrap_lang_tags(ids, lang)
         text_ids = torch.tensor(ids, dtype=torch.long)
         
-        return wav, text_ids, speaker_id, ref_wav, is_self_ref, ref_speaker_id
+        item = wav, text_ids, speaker_id, ref_wav, is_self_ref, ref_speaker_id
+        if self.context_chars:
+            def neighbor(column):
+                value = row.get(column)
+                return text_to_indices(normalize_text(value), lang=lang) if pd.notna(value) else []
+            left = neighbor("left_context")[-self.context_chars:]
+            right = neighbor("right_context")[:self.context_chars]
+            return (*item, (text_ids.new_tensor(left), text_ids, text_ids.new_tensor(right)))
+        return item
 
 
 def collate_text2latent(batch):
@@ -393,6 +438,11 @@ def collate_text2latent(batch):
        ref_speaker_ids: [B]
     """
     # Unpack
+    context = ()
+    if len(batch[0]) == 7:
+        from training.t2l.models.text_encoder import pack_context
+        context = (pack_context([item[-1] for item in batch]),)
+        batch = [item[:-1] for item in batch]
     wavs, texts, spk_ids, ref_wavs, is_self, ref_spk_ids = zip(*batch)
 
     # 1. Pad Target Wavs
@@ -444,4 +494,4 @@ def collate_text2latent(batch):
     is_self = torch.tensor(is_self, dtype=torch.bool)
     ref_spk_ids = torch.tensor(ref_spk_ids, dtype=torch.long)
 
-    return wavs_padded, txt_padded, txt_masks, wav_lens, spk_ids, ref_padded, ref_lens, is_self, ref_spk_ids
+    return wavs_padded, txt_padded, txt_masks, wav_lens, spk_ids, ref_padded, ref_lens, is_self, ref_spk_ids, *context

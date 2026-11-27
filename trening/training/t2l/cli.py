@@ -33,7 +33,7 @@ def main():
         "--resume_from",
         type=str,
         default=None,
-        help="If set and checkpoint_dir has no ckpt_step_*.pt, load latest from this directory",
+        help="If set and checkpoint_dir has no ckpt_step_*.pt, load this exact .pt file or the latest checkpoint in this directory",
     )
     parser.add_argument(
         "--inference_ref_wav",

@@ -180,6 +180,7 @@ def sample_audio(
     latent_dim=24,
     chunk_compress_factor=6,
     normalizer_scale=1.0,
+    context=None,
 ):
     """
     Plain flow-matching sampling:
@@ -265,7 +266,7 @@ def sample_audio(
     h_text = text_encoder(
         text_ids,
         ref_values,
-        text_mask=text_mask,
+        text_mask=text_mask, context=context,
     )
 
     T_txt = h_text.shape[2]
@@ -351,6 +352,7 @@ def sample_audio(
     # Contract: 1 latent frame = hop_length * chunk_compress_factor samples
     frame_len = 512 * chunk_compress_factor
     # Truncate to exact expected frames
-    wav_pred = wav_pred[..., frame_len:-frame_len]
+    if not getattr(text_encoder, "context_chars", 0):
+        wav_pred = wav_pred[..., frame_len:-frame_len]
 
     return wav_pred

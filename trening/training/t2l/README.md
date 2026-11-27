@@ -53,3 +53,46 @@ adds `u_key`, the style keys of every style-dropped row.
 
 ## Healthy Loss Curve
 A healthy Flow Matching training loss curve will start high and exponentially decay, flattening out over time. If using SPFM, you will see it drop further when fine-tuning kicks in.
+
+### Dotrenowanie T2L z kontekstem sąsiednich fragmentów
+
+W kopii konfiguracji ustaw `ttl.text_encoder.context_chars` na maksymalną liczbę znaków z **każdej** strony, np. 64. Wartość 0 (domyślna) zachowuje dotychczasową architekturę. Przy pierwszym dotrenowaniu podaj plik EMA przez `--finetune --resume_from` i wybierz nowy katalog `--out`. Przy wznowieniu trener daje pierwszeństwo punktowi z `--out`. Krok końcowy `--max_steps` musi przekraczać numer kroku checkpointu. Do porównania samego kontekstu ustaw `ttl.rsf.enabled` i `ttl.train.spfm_enabled` na `false`.
+
+Do `--data` i `--val_data` podaj CSV z granicami fragmentów oryginalnego nagrania. Przykład dla pliku 48 kHz:
+
+```csv
+wav_path,speaker_id,lang,phonemized,text,start_frame,end_frame
+rozdzial.wav,1,pl,True,Było już późno.,0,96000
+rozdzial.wav,1,pl,True,Ktoś zapukał.,96000,192000
+rozdzial.wav,1,pl,True,Otworzyłam drzwi.,192000,312000
+```
+
+`start_frame` jest włącznie, `end_frame` wyłącznie, oba w próbkach przy oryginalnej częstotliwości pliku. Granicę wyznacz między słowami, a pauzę uwzględnij dokładnie raz. Trener odczytuje tylko docelowy przedział i dobiera tekst bezpośrednio przyległych przedziałów z tego samego pliku i od tego samego mówcy. Kolejność wierszy jest dowolna. W polskim zbiorze znakowym `phonemized=True` pomija eSpeak. Przy podziale na trening i walidację trzymaj całe nagranie w jednym zbiorze.
+
+Jeżeli przedziały są już zapisane jako osobne klipy, użyj `wav_path,text,speaker_id,lang,phonemized,left_context,right_context`. W tym wariancie można użyć `--latents` z latentami tych klipów. Puste pola oznaczają brak danego sąsiada.
+
+Eksportuj model z tą samą konfiguracją co trening. Po wczytaniu wyeksportowanego modelu `MikolAI.synteza(tekst)` sama dobiera sąsiadów przed sortowaniem fragmentów do partii. Domyślnie zachowuje wygenerowane pauzy. Do odsłuchu bez eksportu użyj `syntezuj.py --akapit --tekst "Było już późno." --tekst "Ktoś zapukał."` razem ze zwykłymi opcjami `--config` i `--ckpt`. Wynik `akapit.wav` znajdziesz obok próbek dla danego ustawienia.
+
+#### Przebieg od EMA 370k do 400k na siedmiu GPU
+
+Polecenie z katalogu `trening/`. Plik `bluetts_train_kontekst.csv` zawiera krótkie klipy oraz wyrównane fragmenty z kolumnami `left_context,right_context`. Przy `--latents` wszystkie te klipy i klipy walidacyjne muszą być w indeksie latentów. Jeśli nowe fragmenty mają być czytane wprost z długich nagrań przez `start_frame,end_frame`, pomiń `--latents`. Dwa dotychczasowe zbiory zachowują nazwy metryk. Dodatkowy pomiar na wyrównanych fragmentach trafia do `val_kontekst/loss`.
+
+```bash
+jq '.ttl.text_encoder.context_chars = 64 | .ttl.train.lr = 0.00025' config/polski_100m.json > config/polski_100m_kontekst.json
+
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+TORCHINDUCTOR_CACHE_DIR=/media/nvme_2tb/maked/audio/cache/inductor \
+TRITON_CACHE_DIR=/media/nvme_2tb/maked/audio/cache/triton \
+NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1 NCCL_CUMEM_HOST_ENABLE=0 \
+CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 -m training.t2l.cli \
+  --config config/polski_100m_kontekst.json --data ../dane/bluetts_train_kontekst.csv \
+  --ae_checkpoint ../modele/kodek_48k_postnet/ae_wsm_6_9.pt --stats_path ../modele/stats.pt \
+  --dp_checkpoint ../modele/dp_v3/duration_predictor_wsm.pt \
+  --finetune --resume_from ../modele/t2l_opus/ema/ckpt_step_370000.pt \
+  --out ../modele/t2l_opus_kontekst_370k --max_steps 400000 --avg_every 50 \
+  --latents ../dane/latenty --inference_ref_wav ../glosy/poziomka_dluga.wav \
+  --val_data ../dane/bluetts_val.csv ../dane/bluetts_val_liczby.csv ../dane/bluetts_val_kontekst.csv \
+  --wandb mikolai --wandb_name t2l-100m-opus-kontekst-370k --compile
+```
+
+`--finetune` inicjalizuje nowy optymalizator z LR 0,00025. Po przerwaniu rozpoczętego przebiegu użyj tego samego `--out` i pomiń `--finetune`, aby przywrócić stan optymalizatora.

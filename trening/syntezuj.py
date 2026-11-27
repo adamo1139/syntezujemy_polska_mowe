@@ -53,6 +53,8 @@ def wczytaj_t2l(sciezka, te, re_, vf, uncond):
     ckpt = torch.load(sciezka, map_location="cpu")
     for mod, klucz in ((vf, "vf_estimator"), (te, "text_encoder"), (re_, "reference_encoder")):
         brak, nadmiar = mod.load_state_dict(ckpt[klucz], strict=False)
+        if "context_roles.weight" in nadmiar:
+            raise ValueError(f"{sciezka}: ustaw ttl.text_encoder.context_chars zgodnie z treningiem")
         if brak:
             raise SystemExit(f"{sciezka}: brak wag {klucz}: {brak[:5]}")
     for nazwa in ("u_text", "u_ref", "u_key"):
@@ -72,6 +74,8 @@ def main() -> None:
     p.add_argument("--dp", default="../modele/dp_v3/duration_predictor_wsm.pt")
     p.add_argument("--ref_wav", default="../glosy/poziomka_dluga.wav", help="wzorzec głosu")
     p.add_argument("--tekst", action="append", help="zdanie (można powtórzyć); domyślnie eval_phrases z konfiguracji")
+    p.add_argument("--akapit", action="store_true",
+                   help="kolejne --tekst to sąsiednie fragmenty akapitu; zapisuje też akapit.wav")
     p.add_argument("--cfg", type=float, nargs="+", default=[4.0])
     p.add_argument("--kroki", type=int, nargs="+", default=[16])
     p.add_argument("--ziarno", type=int, default=0)
@@ -94,6 +98,8 @@ def main() -> None:
 
     with contextlib.redirect_stdout(io.StringIO()):
         te, re_, vf, uncond, dp, enc, dec, mel, _ = build_models(ttl, ae, sr, dev, dp_ckpt_path=args.dp, dp_cfg=cfg.get("dp", {}))
+    if args.akapit and (not te.context_chars or not args.tekst):
+        p.error("--akapit wymaga --tekst oraz ttl.text_encoder.context_chars > 0")
     if dp is None or not os.path.exists(args.dp):
         raise SystemExit(f"Brak predyktora długości: {args.dp}")
     dec = wczytaj_kodek(args.ae_checkpoint, enc, dec, dev)
@@ -133,18 +139,26 @@ def main() -> None:
         for c in args.cfg:
             for k in args.kroki:
                 t0 = time.time()
+                fragmenty = []
                 for i, tekst in enumerate(teksty):
                     ids = text_to_indices_multilang(normalize_text(tekst), base_lang="pl")
                     if lang_tags:
                         ids = wrap_lang_tags(ids, "pl")
                     ids = torch.tensor(ids, dtype=torch.long, device=dev).unsqueeze(0)
+                    context = None
+                    if args.akapit:
+                        from training.t2l.models.text_encoder import pack_context
+                        limit = te.context_chars
+                        left = text_to_indices_multilang(normalize_text(teksty[i - 1]))[-limit:] if i else []
+                        right = text_to_indices_multilang(normalize_text(teksty[i + 1]))[:limit] if i + 1 < len(teksty) else []
+                        context = pack_context([(ids.new_tensor(left), ids[0], ids.new_tensor(right))])
                     torch.manual_seed(args.ziarno + i)
                     with torch.no_grad(), contextlib.redirect_stdout(io.StringIO()):
                         wav = sample_audio(vf, te, re_, dec, ids, torch.ones(1, 1, ids.shape[1], device=dev),
                                            z_ref=None, ref_enc_mask=None, mean=mean, std=std, duration_predictor=dp,
                                            steps=k, device=str(dev), latent_dim=latent_dim, chunk_compress_factor=ccf,
                                            normalizer_scale=scale, style_ttl=styl, style_dp=styl_dp,
-                                           uncond_params=uncond, cfg_scale=c)
+                                           uncond_params=uncond, cfg_scale=c, context=context)
                     ustaw = f"{etykieta}_cfg{c:g}_k{k:02d}"
                     plik = os.path.join(args.wyjscie, "wg_ustawien", ustaw, f"{i + 1:02d}.wav")
                     zdanie = os.path.join(args.wyjscie, "wg_zdan", f"{i + 1:02d}", f"{ustaw}.wav")
@@ -154,6 +168,10 @@ def main() -> None:
                     if os.path.exists(zdanie):
                         os.remove(zdanie)
                     os.link(plik, zdanie)
+                    if args.akapit:
+                        fragmenty.append(wav.reshape(-1).clamp(-1, 1).cpu())
+                if args.akapit:
+                    sf.write(os.path.join(os.path.dirname(plik), "akapit.wav"), torch.cat(fragmenty).numpy(), sr)
                 print(f"{etykieta}  cfg {c:g}  kroki {k:>3}: {len(teksty)} zdań w {time.time() - t0:.1f} s")
     print(f"Wyniki: {args.wyjscie}")
 

@@ -354,24 +354,30 @@ def train(
     # used outside any DDP forward: gradients averaged across ranks by hand
     uncond_tokens = [p for p in (u_text, u_ref, u_key) if p is not None]
 
-    # each parameter once: the projected style key is shared by the text encoder and the VF
-    params = list({id(p): p for m in (text_encoder, reference_encoder, vf_estimator, uncond_params)
-                   for p in m.parameters()}.values())
-    optimizer = AdamW(adamw_groups(params, weight_decay, uncond_tokens), lr=lr, fused=device.type == "cuda")
-
-    global_step = 0
-    scheduler_state = None
     latest_ckpt = _latest_ckpt_in_dir(checkpoint_dir)
     if latest_ckpt is None and resume_from:
-        latest_ckpt = _latest_ckpt_in_dir(resume_from)
+        latest_ckpt = resume_from if os.path.isfile(resume_from) else _latest_ckpt_in_dir(resume_from)
+        if latest_ckpt is None:
+            raise FileNotFoundError(f"No checkpoint found at --resume_from {resume_from}")
         if latest_ckpt is not None and rank == 0:
             print(
                 f"No ckpt in checkpoint_dir; loading weights from resume_from: {latest_ckpt}"
             )
 
+    context_chars = text_encoder.context_chars
+    checkpoint = torch.load(latest_ckpt, map_location=device) if latest_ckpt else {}
+    freeze_reference = bool(context_chars and latest_ckpt and checkpoint.get("freeze_reference", True))
+    if freeze_reference:
+        reference_encoder.requires_grad_(False)
+    # The projected style key is shared by the text encoder and the VF.
+    params = list({id(p): p for m in (text_encoder, reference_encoder, vf_estimator, uncond_params)
+                   for p in m.parameters() if p.requires_grad}.values())
+    optimizer = AdamW(adamw_groups(params, weight_decay, uncond_tokens), lr=lr, fused=device.type == "cuda")
+
+    global_step = 0
+    scheduler_state = None
     if latest_ckpt is not None:
         print(f"Resuming from {latest_ckpt}")
-        checkpoint = torch.load(latest_ckpt, map_location=device)
         shapes_changed = False
         for mod, name in [(vf_estimator, 'vf_estimator'), (text_encoder, 'text_encoder')]:
             if name in checkpoint:
@@ -390,6 +396,8 @@ def train(
         if 'u_text' in checkpoint: u_text.data = checkpoint['u_text']
         if 'u_ref' in checkpoint: u_ref.data = checkpoint['u_ref']
         # the loads above are non-strict: refuse a style-key layout that differs from the config
+        if "context_roles.weight" in checkpoint["text_encoder"] and not context_chars:
+            raise ValueError("This checkpoint requires ttl.text_encoder.context_chars > 0")
         ck_shared = 'speech_prompted_text_encoder.style_key' in checkpoint.get('text_encoder', {})
         ck_ukey = checkpoint.get('u_key') is not None
         if (ck_shared, ck_ukey) != (shared_key, u_key is not None):
@@ -398,7 +406,8 @@ def train(
                 f"style_key_mode projected={shared_key} style_key_uncond={u_key is not None}")
         if shared_key or u_key is not None:
             missing = [k for m, n in ((text_encoder, 'text_encoder'), (vf_estimator, 'vf_estimator'))
-                       for k in m.state_dict() if k not in checkpoint.get(n, {})]
+                       for k in m.state_dict() if k not in checkpoint.get(n, {})
+                       and not (context_chars and k == "context_roles.weight" and finetune)]
             if missing or shapes_changed:
                 raise RuntimeError(f"{latest_ckpt}: incomplete checkpoint for this config (missing {missing[:8]}, "
                                    f"shapes_changed={shapes_changed})")
@@ -466,7 +475,8 @@ def train(
             print(f"[avg] uśrednianie wag co {avg_every} kroków na {dist.get_world_size()} kartach, bez DDP")
     elif dist.is_initialized():
         text_encoder = DDP(text_encoder, device_ids=[local_rank], find_unused_parameters=True)
-        reference_encoder = DDP(reference_encoder, device_ids=[local_rank], find_unused_parameters=True)
+        if not freeze_reference:
+            reference_encoder = DDP(reference_encoder, device_ids=[local_rank], find_unused_parameters=True)
         vf_estimator = DDP(vf_estimator, device_ids=[local_rank], find_unused_parameters=True)
         uncond_params = DDP(uncond_params, device_ids=[local_rank], find_unused_parameters=True)
 
@@ -487,7 +497,13 @@ def train(
         affricate_ligatures=affricate_ligatures,
         lang_tags=lang_tags,
         latents_dir=latents_dir,
+        context_chars=context_chars,
     )
+    if context_chars and not any(
+        dataset.df[c].fillna("").astype(str).str.strip().ne("").any()
+        for c in ("left_context", "right_context") if c in dataset.df
+    ):
+        raise ValueError("Context training requires aligned targets with left_context or right_context")
     if rank == 0:
         print(f"Dataset loaded with {len(dataset)} samples.")
     if latents_dir:
@@ -512,7 +528,7 @@ def train(
             _w = Walidacja(
                 _sciezka, dict(sample_rate=ae_sample_rate, max_wav_len=int(ae_sample_rate * max_wav_sec),
                                max_text_len=max_text_len, affricate_ligatures=affricate_ligatures, lang_tags=lang_tags,
-                               latents_dir=latents_dir),
+                               latents_dir=latents_dir, context_chars=context_chars),
                 rank, dist.get_world_size() if dist.is_initialized() else 1, device,
                 batch_seconds=2 * (batch_seconds or 160.0), max_batch=max_batch, prefiks=_prefiks)
             walidacje.append((_prefiks, _w))
@@ -564,6 +580,8 @@ def train(
     # Validation Batch
     try:
         val_batch = next(iter(dataloader))
+        val_context = tuple(x[:1].to(device) for x in val_batch[9]) if len(val_batch) == 10 else None
+        val_batch = val_batch[:9]
         # Handle unpacking dynamically for validation too
         if len(val_batch) == 9:
             val_wavs, val_text_ids, val_text_masks, val_lengths, _, val_ref_wavs, val_ref_lengths, val_is_self, _ = val_batch
@@ -677,7 +695,7 @@ def train(
         epoch += 1
 
         text_encoder.train()
-        reference_encoder.train()
+        reference_encoder.train(not freeze_reference)
         vf_estimator.train()
 
         progress_bar = tqdm(dataloader, desc=f"{'[FT] ' if finetune else ''}Step {global_step}")
@@ -693,6 +711,8 @@ def train(
         for batch_idx, batch in enumerate(timed_batches(progress_bar, prof)):
             if global_step >= max_steps: break
 
+            context = tuple(x.to(device) for x in batch[9]) if len(batch) == 10 else None
+            batch = batch[:9]
             if len(batch) == 9:
                 (
                     wavs, text_ids, text_masks, lengths, speaker_ids,
@@ -819,7 +839,7 @@ def train(
                         )
 
             with amp_ctx():
-                h_text = text_encoder(text_ids, ref_values, text_mask=text_masks)
+                h_text = text_encoder(text_ids, ref_values, text_mask=text_masks, context=context)
             
             # (latent_mask already computed above; z_1 masked)
             T_txt = h_text.shape[2]
@@ -1036,6 +1056,7 @@ def train(
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "global_step": global_step,
+                    **({"freeze_reference": freeze_reference} if context_chars else {}),
                 }
                 if ema is not None:
                     _ckpt["ema"] = ema.state_dicts()
@@ -1061,6 +1082,7 @@ def train(
                     "optimizer": optimizer.state_dict(),
                     "scheduler": scheduler.state_dict(),
                     "global_step": global_step,
+                    **({"freeze_reference": freeze_reference} if context_chars else {}),
                 }
                 if ema is not None:
                     ckpt["ema"] = ema.state_dicts()
@@ -1255,7 +1277,7 @@ def train(
                                 mean=mean, std=std,
                                 duration_predictor=dp_model,
                                 steps=16,
-                                device=dev, debug_label="vc",
+                                device=dev, debug_label="vc", context=val_context,
                                 latent_dim=latent_dim,
                                 chunk_compress_factor=chunk_compress_factor,
                                 normalizer_scale=normalizer_scale,
@@ -1279,7 +1301,7 @@ def train(
                 
                 vf_estimator.train()
                 text_encoder.train()
-                reference_encoder.train()
+                reference_encoder.train(not freeze_reference)
                 metryki.audio(log_dir, global_step, ae_sample_rate)
 
         # Flush remaining gradients if dataloader length is not divisible by accumulation_steps

@@ -331,6 +331,18 @@ class StyleAttention(nn.Module):
         return x
 
 
+def pack_context(windows):
+    """Each window holds unpadded left, target and right token tensors."""
+    ids, roles, starts = [], [], []
+    for left, target, right in windows:
+        ids.append(torch.cat((left, target, right)))
+        roles.append(torch.cat((torch.ones_like(left), torch.zeros_like(target), torch.full_like(right, 2))))
+        starts.append(len(left))
+    pad = nn.utils.rnn.pad_sequence
+    return (pad(ids, batch_first=True), pad(roles, batch_first=True, padding_value=-1),
+            ids[0].new_tensor(starts))
+
+
 class TextEncoder(nn.Module):
     def __init__(
         self,
@@ -353,8 +365,15 @@ class TextEncoder(nn.Module):
         edge_fill: bool = False,
         spte_key_mode: str = "baked",
         attn_xsa: bool = False,
+        context_chars: int = 0,
     ):
         super().__init__()
+        if type(context_chars) is not int or context_chars < 0:
+            raise ValueError("context_chars must be a nonnegative integer")
+        self.context_chars = context_chars
+        self.context_roles = nn.Embedding(3, d_model, padding_idx=0) if context_chars else None
+        if self.context_roles is not None:
+            nn.init.zeros_(self.context_roles.weight)
         self.d_model = d_model
         self.text_embedder = TextEmbedderWrapper(vocab_size, d_model)
         self.convnext = ConvNeXtWrapper(
@@ -379,8 +398,15 @@ class TextEncoder(nn.Module):
         )
         self.proj_out = nn.Identity()
 
-    def forward(self, text_ids: torch.Tensor, style_ttl: torch.Tensor, text_mask: torch.Tensor | None = None) -> torch.Tensor:
-        x = self.text_embedder(text_ids)
+    def forward(self, text_ids: torch.Tensor, style_ttl: torch.Tensor, text_mask: torch.Tensor | None = None,
+                context=None) -> torch.Tensor:
+        target_mask = text_mask
+        if context is not None:
+            window, roles, starts = context
+            x = self.text_embedder(window) + self.context_roles(roles.clamp_min(0))
+            text_mask = (roles >= 0).unsqueeze(1).to(x.dtype)
+        else:
+            x = self.text_embedder(text_ids)
         x = x.transpose(1, 2)
 
         if text_mask is not None:
@@ -396,5 +422,9 @@ class TextEncoder(nn.Module):
         if text_mask is not None:
             x = x * text_mask
 
-        x = self.speech_prompted_text_encoder(x, style_values=style_ttl, mask=text_mask)
-        return x
+        if context is not None:
+            pos = starts[:, None] + torch.arange(text_ids.shape[1], device=x.device)
+            pos = pos.clamp_max(x.shape[2] - 1)
+            x = x.gather(2, pos[:, None].expand(-1, x.shape[1], -1))
+            text_mask = target_mask
+        return self.speech_prompted_text_encoder(x, style_values=style_ttl, mask=text_mask)

@@ -71,7 +71,8 @@ class Walidacja:
                         z_1, valid_z_len, z_ref_full, valid_z_len_ref, is_self, self.device)
                     with amp_ctx():
                         styl = re_(z_ref, mask=ref_mask)
-                        h = te(text_ids, styl, text_mask=text_masks)
+                        context = tuple(x.to(self.device) for x in partia[9]) if len(partia) == 10 else None
+                        h = te(text_ids, styl, text_mask=text_masks, context=context)
                     K = len(PUNKTY_T)
                     t = torch.tensor(PUNKTY_T, device=self.device).repeat(B)
                     z1e = z_1.repeat_interleave(K, 0)
