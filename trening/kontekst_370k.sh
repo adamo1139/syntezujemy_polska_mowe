@@ -17,7 +17,7 @@ case "${1:-}" in
     for split in train val; do
       opcje=()
       if [[ "$split" == val ]]; then opcje+=(--tylko-kontekst); fi
-      uv run --no-sync --with transformers==5.24.1 python przygotuj_kontekst.py \
+      uv run --no-sync --with moondream==2.6.1 python przygotuj_kontekst.py \
         "$dane/bluetts_${split}.csv" "$dane/bluetts_${split}_kontekst.csv" "${opcje[@]}"
     done
     python policz_latenty.py --metadata "$train" "${walidacja[@]}" \

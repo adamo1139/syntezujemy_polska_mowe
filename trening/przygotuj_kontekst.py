@@ -1,5 +1,6 @@
 """Wyrównuje zdania wewnątrz pojedynczych klipów BlueTTS i zapisuje CSV dla kontekstowego T2L."""
 import argparse
+from contextlib import ExitStack
 import csv
 import hashlib
 import json
@@ -11,7 +12,7 @@ import numpy as np
 import soundfile as sf
 import torch
 from torchaudio.functional import resample
-from transformers import pipeline
+import moondream as md
 from tqdm import tqdm
 
 
@@ -28,7 +29,7 @@ def split_sentences(text):
 
 
 def quiet_boundary(audio, sr, end, start, peak):
-    # Przeszukaj przerwę między słowami i margines błędu znaczników Whisper.
+    # Przeszukaj przerwę między słowami i margines błędu znaczników słów.
     if end is None or start is None or not 0 <= end <= start <= len(audio) / sr or start - end > 1.5:
         return None
     lo = max(0, round((end - 0.08) * sr))
@@ -51,9 +52,10 @@ def align(model, source, sentences):
     audio, sr = sf.read(source, dtype="float32", always_2d=True)
     mono = audio.mean(axis=1)
     samples = resample(torch.from_numpy(mono), sr, 16000).numpy()
-    result = model(samples, return_timestamps="word",
-                   generate_kwargs={"language": "pl", "task": "transcribe"})
-    timed = [(token, *chunk["timestamp"]) for chunk in result["chunks"] for token in words(chunk["text"])]
+    result = model.transcribe(audio=np.ascontiguousarray(np.clip(samples, -1, 1)), sample_rate=16000,
+                              timestamps="word")
+    timed = [(token, w["start"], w["end"]) for seg in result["segments"]
+             for w in seg.get("words", []) for token in words(w["word"])]
     expected = [words(s) for s in sentences]
     if [t[0] for t in timed] != [w for sentence in expected for w in sentence]:
         return []
@@ -82,7 +84,8 @@ def main():
     p.add_argument("csv", type=Path)
     p.add_argument("out", type=Path)
     p.add_argument("--tylko-kontekst", action="store_true", help="walidacja tylko na podzielonych klipach")
-    p.add_argument("--model", default="openai/whisper-large-v3-turbo")
+    p.add_argument("--model", choices=["moondream/parakeet-ultra", "moondream/parakeet-redux"],
+                   default="moondream/parakeet-ultra")
     p.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     args = p.parse_args()
     if args.csv.resolve() == args.out.resolve():
@@ -92,7 +95,7 @@ def main():
     tmp = args.out.with_suffix(".csv.tmp")
     model = None
     accepted = 0
-    with args.csv.open(encoding="utf-8") as src, tmp.open("w", newline="", encoding="utf-8") as dst:
+    with ExitStack() as stack, args.csv.open(encoding="utf-8") as src, tmp.open("w", newline="", encoding="utf-8") as dst:
         rows = csv.DictReader(src)
         writer = csv.DictWriter(dst, fieldnames=[*rows.fieldnames, "left_context", "right_context"],
                                 quoting=csv.QUOTE_ALL)
@@ -115,8 +118,7 @@ def main():
                     clips = cached
                 else:
                     if model is None:
-                        model = pipeline("automatic-speech-recognition", model=args.model, device=args.device,
-                                         dtype=torch.float16 if args.device == "cuda" else torch.float32)
+                        model = stack.enter_context(md.photon(args.model, device=args.device))
                     for i, (text, audio, sr) in enumerate(align(model, source, sentences)):
                         path = folder / f"{key}_{i}.flac"
                         sf.write(path, audio, sr, subtype="PCM_24")
