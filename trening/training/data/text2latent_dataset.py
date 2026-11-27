@@ -48,6 +48,8 @@ class Text2LatentDataset(Dataset):
         load_ref: bool = True,            # False: bez drugiego klipu jako wzorca (zwracany jest ten sam klip)
         latents_dir: str | None = None,   # katalog z policz_latenty.py: zwracane są latenty [144, T] zamiast audio
         context_chars: int = 0,
+        history_frames: int = 0,
+        latent_hop: int = 3072,
     ):
         self.sample_rate = sample_rate
         self.hop_length = hop_length
@@ -55,8 +57,10 @@ class Text2LatentDataset(Dataset):
         self.max_text_len = max_text_len
         self.default_lang = default_lang
         self.lang_tags = lang_tags
-        # Context windows may borrow text only. Take the voice reference from the target interval.
+        # The voice reference is independent of the acoustic continuation input.
         self.load_ref = load_ref and not context_chars
+        self.history_frames = history_frames
+        self.latent_hop = latent_hop
         self.context_chars = context_chars
         self.latents_dir = latents_dir
         self._lat_mm = None
@@ -112,6 +116,19 @@ class Text2LatentDataset(Dataset):
             if latents_dir:
                 raise ValueError("Cached clip latents require distinct target files; use raw audio for source intervals")
             self._index_intervals()
+
+        if history_frames and not self.segmented:
+            # Original context manifests predate previous_audio. Their cache names identify both the
+            # original recording (digest) and the contiguous split number within that recording.
+            if "previous_audio" not in self.df:
+                parts = self.df.wav_path.str.extract(r"^(.*_klipy/[0-9a-f]{2}/[0-9a-f]{64})_(\d+)\.flac$")
+                number = pd.to_numeric(parts[1])
+                self.df["previous_audio"] = (parts[0] + "_" + (number - 1).astype("Int64").astype(str)
+                                             + ".flac").where(number > 0)
+            # Both halves must belong to this split and speaker. Never pair independent clips by CSV order.
+            targets = pd.MultiIndex.from_frame(self.df[["wav_path", "speaker_id"]])
+            previous = pd.MultiIndex.from_frame(self.df[["previous_audio", "speaker_id"]])
+            self.df["previous_audio"] = self.df.previous_audio.where(previous.isin(targets))
 
         # --- 2. Language setup ---
         if 'lang' not in self.df.columns:
@@ -181,6 +198,9 @@ class Text2LatentDataset(Dataset):
             if (~w_indeksie).any():
                 print(f"[Dataset] {int((~w_indeksie).sum())} klipów nie ma w {latents_dir}/indeks.json — pomijam")
             self.df = self.df[w_indeksie].reset_index(drop=True)
+            if self.history_frames:
+                previous = self.df.previous_audio.map(self._resolve_path, na_action="ignore")
+                self.df["previous_audio"] = self.df.previous_audio.where(previous.isin(self.lat_index))
             self.df['dur_sec'] = self.df['wav_path'].map(lambda w: float(self.lat_index[self._resolve_path(w)][2]))
             if self.max_wav_len is not None:
                 self.df = self.df[self.df['dur_sec'] * self.sample_rate <= self.max_wav_len].reset_index(drop=True)
@@ -300,6 +320,9 @@ class Text2LatentDataset(Dataset):
                 adjacent = ((ordered.wav_path == neighbor.wav_path) & (ordered.speaker_id == neighbor.speaker_id)
                             & (ordered[edge] == neighbor[other]))
                 self.df[name] = neighbor.text.where(adjacent, "")
+                if self.history_frames and shift == 1:
+                    self.df["previous_audio"] = neighbor.wav_path.where(adjacent)
+                    self.df["previous_start"] = neighbor.start_frame.where(adjacent)
 
     def _duration_sec(self, row):
         """Długość klipu w sekundach z nagłówka pliku; 0.0, gdy pliku nie da się odczytać (jak _is_duration_ok: zostaje)."""
@@ -328,16 +351,18 @@ class Text2LatentDataset(Dataset):
     def _assign_speaker_ids(self):
         self.df['speaker_id'] = self.df['speaker_id'].astype(int)
 
-    def _load_latent_by_index(self, idx):
+    def _load_latent(self, path, tail=None):
         """Latenty klipu [144, T] (float32, nieznormalizowane) z pliku policz_latenty.py."""
         if self._lat_mm is None:   # otwierane leniwie, osobno w każdym procesie wczytującym
             self._lat_mm = np.load(os.path.join(self.latents_dir, "latenty.npy"), mmap_mode="r")
-        off, n, _ = self.lat_index[self._resolve_path(self.df.iloc[idx]['wav_path'])]
+        off, n, _ = self.lat_index[path]
+        if tail is not None:
+            off, n = off + max(0, n - tail), min(n, tail)
         return torch.from_numpy(np.asarray(self._lat_mm[off:off + n], dtype=np.float32).T.copy())
 
     def _load_wav_by_index(self, idx):
         if self.latents_dir:
-            return self._load_latent_by_index(idx)
+            return self._load_latent(self._resolve_path(self.df.iloc[idx]["wav_path"]))
         row = self.df.iloc[idx]
         wav_path = self._resolve_path(row['wav_path'])
 
@@ -368,6 +393,25 @@ class Text2LatentDataset(Dataset):
         if wav.numel() < self.hop_length:
             wav = F.pad(wav, (0, self.hop_length - wav.numel()))
         return wav
+
+    def _history(self, row, wav):
+        path = row["previous_audio"]
+        width = self.history_frames
+        if pd.isna(path):
+            history = wav[..., :0]
+        elif self.latents_dir:
+            history = self._load_latent(self._resolve_path(path), tail=width)
+        else:
+            with sf.SoundFile(self._resolve_path(path)) as src:
+                start, end = (int(row.previous_start), int(row.start_frame)) if self.segmented else (0, len(src))
+                count = min(end - start, int(np.ceil(width * self.latent_hop * src.samplerate / self.sample_rate)))
+                src.seek(end - count)
+                samples = src.read(count, dtype="float32", always_2d=True).mean(axis=1)
+                history = ensure_sr(torch.from_numpy(samples), src.samplerate, self.sample_rate, device="cpu").reshape(-1)
+        if not self.latents_dir:
+            width *= self.latent_hop
+        history = history[..., -width:]
+        return F.pad(history, (width - history.size(-1), 0)), history.size(-1)
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
@@ -420,7 +464,10 @@ class Text2LatentDataset(Dataset):
                 return text_to_indices(normalize_text(value), lang=lang) if pd.notna(value) else []
             left = neighbor("left_context")[-self.context_chars:]
             right = neighbor("right_context")[:self.context_chars]
-            return (*item, (text_ids.new_tensor(left), text_ids, text_ids.new_tensor(right)))
+            item = (*item, (text_ids.new_tensor(left), text_ids, text_ids.new_tensor(right)))
+            if self.history_frames:
+                return (*item, self._history(row, wav))
+            return item
         return item
 
 
@@ -440,6 +487,11 @@ def collate_text2latent(batch):
     """
     # Unpack
     context = ()
+    histories = ()
+    if len(batch[0]) == 8:
+        tails, lengths = zip(*(item[-1] for item in batch))
+        histories = ((torch.stack(tails), torch.tensor(lengths)),)
+        batch = [item[:-1] for item in batch]
     if len(batch[0]) == 7:
         from training.t2l.models.text_encoder import pack_context
         context = (pack_context([item[-1] for item in batch]),)
@@ -495,4 +547,4 @@ def collate_text2latent(batch):
     is_self = torch.tensor(is_self, dtype=torch.bool)
     ref_spk_ids = torch.tensor(ref_spk_ids, dtype=torch.long)
 
-    return wavs_padded, txt_padded, txt_masks, wav_lens, spk_ids, ref_padded, ref_lens, is_self, ref_spk_ids, *context
+    return wavs_padded, txt_padded, txt_masks, wav_lens, spk_ids, ref_padded, ref_lens, is_self, ref_spk_ids, *context, *histories

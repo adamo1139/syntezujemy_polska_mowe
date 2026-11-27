@@ -64,15 +64,15 @@ class Walidacja:
                     ziarno = self.seed + 1000 * self.rank + nr
                     np.random.seed(ziarno)
                     torch.manual_seed(ziarno)
-                    z_1, valid_z_len, z_ref_full, valid_z_len_ref, is_self, text_ids, text_masks = przygotuj(partia)
+                    z_1, valid_z_len, z_ref_full, valid_z_len_ref, is_self, text_ids, text_masks, history = przygotuj(partia)
                     B, C, T = z_1.shape
                     latent_mask = (torch.arange(T, device=self.device)[None] < valid_z_len[:, None]).unsqueeze(1).float()
                     z_ref, ref_mask, _, target_mask = build_reference_from_latents(
                         z_1, valid_z_len, z_ref_full, valid_z_len_ref, is_self, self.device)
                     with amp_ctx():
                         styl = re_(z_ref, mask=ref_mask)
-                        context = tuple(x.to(self.device) for x in partia[9]) if len(partia) == 10 else None
-                        h = te(text_ids, styl, text_mask=text_masks, context=context)
+                        context = tuple(x.to(self.device) for x in partia[9]) if len(partia) >= 10 else None
+                        h = te(text_ids, styl, text_mask=text_masks, context=context, history=history)
                     K = len(PUNKTY_T)
                     t = torch.tensor(PUNKTY_T, device=self.device).repeat(B)
                     z1e = z_1.repeat_interleave(K, 0)

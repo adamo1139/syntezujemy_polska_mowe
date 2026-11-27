@@ -232,7 +232,7 @@ def main():
     counts = Counter()
     with ExitStack() as stack, args.csv.open(encoding="utf-8") as src, tmp.open("w", newline="", encoding="utf-8") as dst:
         rows = csv.DictReader(src)
-        writer = csv.DictWriter(dst, fieldnames=[*rows.fieldnames, "left_context", "right_context"],
+        writer = csv.DictWriter(dst, fieldnames=[*rows.fieldnames, "left_context", "right_context", "previous_audio"],
                                 quoting=csv.QUOTE_ALL)
         writer.writeheader()
         with tqdm(desc=args.csv.stem, unit="klip") as progress:
@@ -243,6 +243,7 @@ def main():
                         accepted += 1
                         for i, (text, path) in enumerate(clips):
                             writer.writerow(dict(row, filename=path, whisper_phonemes=text,
+                                                 previous_audio=clips[i-1][1] if i else "",
                                                  left_context=clips[i-1][0] if i else "",
                                                  right_context=clips[i+1][0] if i+1 < len(clips) else ""))
                     elif not args.tylko_kontekst:

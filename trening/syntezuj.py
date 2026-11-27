@@ -53,6 +53,8 @@ def wczytaj_t2l(sciezka, te, re_, vf, uncond):
     ckpt = torch.load(sciezka, map_location="cpu")
     for mod, klucz in ((vf, "vf_estimator"), (te, "text_encoder"), (re_, "reference_encoder")):
         brak, nadmiar = mod.load_state_dict(ckpt[klucz], strict=False)
+        if any(k.startswith("history_projection.") for k in nadmiar):
+            raise ValueError(f"{sciezka}: ustaw ttl.text_encoder.history_frames zgodnie z treningiem")
         if "context_roles.weight" in nadmiar:
             raise ValueError(f"{sciezka}: ustaw ttl.text_encoder.context_chars zgodnie z treningiem")
         if brak:
@@ -140,6 +142,8 @@ def main() -> None:
             for k in args.kroki:
                 t0 = time.time()
                 fragmenty = []
+                history = None
+                continuation = bool(args.akapit and te.history_frames)
                 for i, tekst in enumerate(teksty):
                     ids = text_to_indices_multilang(normalize_text(tekst), base_lang="pl")
                     if lang_tags:
@@ -158,7 +162,10 @@ def main() -> None:
                                            z_ref=None, ref_enc_mask=None, mean=mean, std=std, duration_predictor=dp,
                                            steps=k, device=str(dev), latent_dim=latent_dim, chunk_compress_factor=ccf,
                                            normalizer_scale=scale, style_ttl=styl, style_dp=styl_dp,
-                                           uncond_params=uncond, cfg_scale=c, context=context)
+                                           uncond_params=uncond, cfg_scale=c, context=context,
+                                           history=history, return_history=continuation)
+                        if continuation:
+                            wav, history = wav
                     ustaw = f"{etykieta}_cfg{c:g}_k{k:02d}"
                     plik = os.path.join(args.wyjscie, "wg_ustawien", ustaw, f"{i + 1:02d}.wav")
                     zdanie = os.path.join(args.wyjscie, "wg_zdan", f"{i + 1:02d}", f"{ustaw}.wav")

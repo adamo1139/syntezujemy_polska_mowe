@@ -113,6 +113,8 @@ def build_models(ttl_cfg, ae_cfg_json, ae_sample_rate, device, dp_ckpt_path="che
         edge_fill=edge_fill,
         spte_key_mode=spte_key_mode,
         context_chars=te_cfg.get("context_chars", 0),
+        history_frames=te_cfg.get("history_frames", 0),
+        latent_channels=ttl_cfg["latent_dim"] * ttl_cfg["chunk_compress_factor"],
         attn_xsa=bool(te_cfg["attn_encoder"].get("xsa", False)),
     ).to(device)
 

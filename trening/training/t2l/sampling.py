@@ -181,6 +181,8 @@ def sample_audio(
     chunk_compress_factor=6,
     normalizer_scale=1.0,
     context=None,
+    history=None,
+    return_history=False,
 ):
     """
     Plain flow-matching sampling:
@@ -266,7 +268,7 @@ def sample_audio(
     h_text = text_encoder(
         text_ids,
         ref_values,
-        text_mask=text_mask, context=context,
+        text_mask=text_mask, context=context, history=history,
     )
 
     T_txt = h_text.shape[2]
@@ -355,4 +357,10 @@ def sample_audio(
     if not getattr(text_encoder, "context_chars", 0):
         wav_pred = wav_pred[..., frame_len:-frame_len]
 
+    if return_history:
+        if B != 1 or not text_encoder.history_frames:
+            raise ValueError("return_history expects a single continuation target")
+        n = int(latent_mask[0].sum().item())
+        tail = x[:, :, :n][:, :, -text_encoder.history_frames:]
+        return wav_pred, torch.nn.functional.pad(tail, (text_encoder.history_frames - tail.size(2), 0))
     return wav_pred

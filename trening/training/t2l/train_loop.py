@@ -364,6 +364,7 @@ def train(
                 f"No ckpt in checkpoint_dir; loading weights from resume_from: {latest_ckpt}"
             )
 
+    history_frames = text_encoder.history_frames
     context_chars = text_encoder.context_chars
     checkpoint = torch.load(latest_ckpt, map_location=device) if latest_ckpt else {}
     freeze_reference = bool(context_chars and latest_ckpt and checkpoint.get("freeze_reference", True))
@@ -398,6 +399,8 @@ def train(
         # the loads above are non-strict: refuse a style-key layout that differs from the config
         if "context_roles.weight" in checkpoint["text_encoder"] and not context_chars:
             raise ValueError("This checkpoint requires ttl.text_encoder.context_chars > 0")
+        if any(k.startswith("history_projection.") for k in checkpoint["text_encoder"]) and not history_frames:
+            raise ValueError("This checkpoint requires ttl.text_encoder.history_frames")
         ck_shared = 'speech_prompted_text_encoder.style_key' in checkpoint.get('text_encoder', {})
         ck_ukey = checkpoint.get('u_key') is not None
         if (ck_shared, ck_ukey) != (shared_key, u_key is not None):
@@ -407,7 +410,7 @@ def train(
         if shared_key or u_key is not None:
             missing = [k for m, n in ((text_encoder, 'text_encoder'), (vf_estimator, 'vf_estimator'))
                        for k in m.state_dict() if k not in checkpoint.get(n, {})
-                       and not (context_chars and k == "context_roles.weight" and finetune)]
+                       and not (finetune and (k == "context_roles.weight" or k.startswith("history_projection.")))]
             if missing or shapes_changed:
                 raise RuntimeError(f"{latest_ckpt}: incomplete checkpoint for this config (missing {missing[:8]}, "
                                    f"shapes_changed={shapes_changed})")
@@ -497,8 +500,10 @@ def train(
         affricate_ligatures=affricate_ligatures,
         lang_tags=lang_tags,
         latents_dir=latents_dir,
-        context_chars=context_chars,
+        context_chars=context_chars, history_frames=history_frames, latent_hop=hop_length * chunk_compress_factor,
     )
+    if history_frames and not dataset.df.previous_audio.notna().any():
+        raise ValueError("No consecutive audio targets in training manifest")
     if context_chars and not any(
         dataset.df[c].fillna("").astype(str).str.strip().ne("").any()
         for c in ("left_context", "right_context") if c in dataset.df
@@ -528,7 +533,8 @@ def train(
             _w = Walidacja(
                 _sciezka, dict(sample_rate=ae_sample_rate, max_wav_len=int(ae_sample_rate * max_wav_sec),
                                max_text_len=max_text_len, affricate_ligatures=affricate_ligatures, lang_tags=lang_tags,
-                               latents_dir=latents_dir, context_chars=context_chars),
+                               latents_dir=latents_dir, context_chars=context_chars, history_frames=history_frames,
+                               latent_hop=hop_length * chunk_compress_factor),
                 rank, dist.get_world_size() if dist.is_initialized() else 1, device,
                 batch_seconds=2 * (batch_seconds or 160.0), max_batch=max_batch, prefiks=_prefiks)
             walidacje.append((_prefiks, _w))
@@ -577,10 +583,24 @@ def train(
         worker_init_fn=functools.partial(seed_worker, rank=rank, start_step=global_step),
     )
     
+    @torch.no_grad()
+    def prepare_history(batch):
+        if len(batch) < 11:
+            return None
+        tail, lengths = (v.to(device) for v in batch[10])
+        if not latents_dir:
+            tail = compress_latents(ae_encoder(mel_spec(tail)), factor=chunk_compress_factor)[..., :history_frames]
+            stride = hop_length * chunk_compress_factor
+            lengths = (lengths + stride - 1) // stride
+        tail = ((tail - mean) / std) * normalizer_scale
+        valid = torch.arange(history_frames, device=device)[None, :] >= history_frames - lengths[:, None]
+        return tail * valid[:, None, :]
+
     # Validation Batch
     try:
         val_batch = next(iter(dataloader))
-        val_context = tuple(x[:1].to(device) for x in val_batch[9]) if len(val_batch) == 10 else None
+        val_history = prepare_history(val_batch)
+        val_context = tuple(x[:1].to(device) for x in val_batch[9]) if len(val_batch) >= 10 else None
         val_batch = val_batch[:9]
         # Handle unpacking dynamically for validation too
         if len(val_batch) == 9:
@@ -685,7 +705,7 @@ def train(
         vz = vz[:, :, :vT]
         vz = vz * (torch.arange(vT, device=device)[None] < vlen[:, None]).unsqueeze(1).float()
         vz_ref = vz_ref * (torch.arange(vz_ref.shape[2], device=device)[None] < vlen_ref[:, None]).unsqueeze(1).float()
-        return vz, vlen, vz_ref, vlen_ref, v_self, v_ids, v_tmask
+        return vz, vlen, vz_ref, vlen_ref, v_self, v_ids, v_tmask, prepare_history(b)
 
     _val_amp = (lambda: torch.autocast(device_type=device.type, dtype=amp_dtype)) if amp_dtype else contextlib.nullcontext
     _val_tile = (lambda n: unwrap_ddp(vf_estimator).tile.expand(n, -1, -1)) if u_key is not None else (lambda n: None)
@@ -711,7 +731,8 @@ def train(
         for batch_idx, batch in enumerate(timed_batches(progress_bar, prof)):
             if global_step >= max_steps: break
 
-            context = tuple(x.to(device) for x in batch[9]) if len(batch) == 10 else None
+            history = prepare_history(batch)
+            context = tuple(x.to(device) for x in batch[9]) if len(batch) >= 10 else None
             batch = batch[:9]
             if len(batch) == 9:
                 (
@@ -839,7 +860,7 @@ def train(
                         )
 
             with amp_ctx():
-                h_text = text_encoder(text_ids, ref_values, text_mask=text_masks, context=context)
+                h_text = text_encoder(text_ids, ref_values, text_mask=text_masks, context=context, history=history)
             
             # (latent_mask already computed above; z_1 masked)
             T_txt = h_text.shape[2]
@@ -1236,6 +1257,7 @@ def train(
                                 duration_predictor=dp_model,
                                 steps=16,
                                 device=dev, debug_label="vc", context=val_context,
+                                history=val_history[:1] if val_history is not None else None,
                                 latent_dim=latent_dim,
                                 chunk_compress_factor=chunk_compress_factor,
                                 normalizer_scale=normalizer_scale,

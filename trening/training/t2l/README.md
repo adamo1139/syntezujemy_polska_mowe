@@ -67,32 +67,31 @@ rozdzial.wav,1,pl,True,Ktoś zapukał.,96000,192000
 rozdzial.wav,1,pl,True,Otworzyłam drzwi.,192000,312000
 ```
 
-`start_frame` jest włącznie, `end_frame` wyłącznie, oba w próbkach przy oryginalnej częstotliwości pliku. Granicę wyznacz między słowami, a pauzę uwzględnij dokładnie raz. Trener odczytuje tylko docelowy przedział i dobiera tekst bezpośrednio przyległych przedziałów z tego samego pliku i od tego samego mówcy. Przy włączonym kontekście wzorzec głosu w treningu i walidacji pochodzi z wycinka tego samego celu. Sąsiedzi dostarczają wyłącznie tekst. Kolejność wierszy jest dowolna. W polskim zbiorze znakowym `phonemized=True` pomija eSpeak. Przy podziale na trening i walidację trzymaj całe nagranie w jednym zbiorze.
+`start_frame` jest włącznie, `end_frame` wyłącznie, oba w próbkach przy oryginalnej częstotliwości pliku. Granicę wyznacz między słowami, a pauzę uwzględnij dokładnie raz. Trener dobiera tekst bezpośrednio przyległych przedziałów z tego samego pliku i od tego samego mówcy. Przy włączonym kontekście wzorzec głosu w treningu i walidacji pochodzi z wycinka tego samego celu. Przy dodatnim `ttl.text_encoder.history_frames` trener dodatkowo odczytuje końcówkę bezpośrednio poprzedzającego przedziału jako warunek predykcji celu. Pierwszy fragment dostaje zera. Kolejność wierszy jest dowolna. W polskim zbiorze znakowym `phonemized=True` pomija eSpeak. Przy podziale na trening i walidację trzymaj całe nagranie w jednym zbiorze.
 
-Jeżeli przedziały są już zapisane jako osobne klipy, użyj `wav_path,text,speaker_id,lang,phonemized,left_context,right_context`. W tym wariancie można użyć `--latents` z latentami tych klipów. Puste pola oznaczają brak danego sąsiada. Dla niezależnych klipów VoxCPM2 zostaw oba pola puste. Przykłady przejść przygotuj z ciągłych nagrań wielozdaniowych.
+Jeżeli przedziały są już zapisane jako osobne klipy, użyj `wav_path,text,speaker_id,lang,phonemized,left_context,right_context`. Kolumna `previous_audio` wskazuje poprzedni fragment tego samego nagrania. Dla starszych manifestów z `przygotuj_kontekst.py` trener odtwarza to powiązanie z nazw plików. W tym wariancie można użyć `--latents` z latentami tych klipów. Puste pola oznaczają brak danego sąsiada. Dla niezależnych klipów VoxCPM2 zostaw oba pola puste. Przykłady przejść przygotuj z ciągłych nagrań wielozdaniowych.
 
-Eksportuj model z tą samą konfiguracją co trening. Po wczytaniu wyeksportowanego modelu `MikolAI.synteza(tekst)` sama dobiera sąsiadów przed sortowaniem fragmentów do partii. Domyślnie zachowuje wygenerowane pauzy. Do odsłuchu bez eksportu użyj `syntezuj.py --akapit --tekst "Było już późno." --tekst "Ktoś zapukał."` razem ze zwykłymi opcjami `--config` i `--ckpt`. Wynik `akapit.wav` znajdziesz obok próbek dla danego ustawienia.
+Eksportuj model z tą samą konfiguracją co trening. Po wczytaniu wyeksportowanego modelu `MikolAI.synteza(tekst)` przy włączonej historii generuje fragmenty po kolei, przekazując 32 końcowe ramki latentów (2,048 s dla tego kodeka) do generacji kolejnego fragmentu. Domyślnie zachowuje wygenerowane pauzy. Do odsłuchu bez eksportu użyj `syntezuj.py --akapit --tekst "Było już późno." --tekst "Ktoś zapukał."` razem ze zwykłymi opcjami `--config` i `--ckpt`. Wynik `akapit.wav` znajdziesz obok próbek dla danego ustawienia.
 
-#### Przebieg od EMA 370k do 400k na siedmiu GPU
+#### Przebieg od EMA 370k do 500k na siedmiu GPU
 
 Polecenie z katalogu `trening/`. Plik `bluetts_train_kontekst.csv` zawiera krótkie klipy oraz wyrównane fragmenty z kolumnami `left_context,right_context`. Przy `--latents` wszystkie te klipy i klipy walidacyjne muszą być w indeksie latentów. Jeśli nowe fragmenty mają być czytane wprost z długich nagrań przez `start_frame,end_frame`, pomiń `--latents`. Dwa dotychczasowe zbiory zachowują nazwy metryk. Dodatkowy pomiar na wyrównanych fragmentach trafia do `val_kontekst/loss`.
 
 ```bash
-jq '.ttl.text_encoder.context_chars = 64 | .ttl.train.lr = 0.00025' config/polski_100m.json > config/polski_100m_kontekst.json
 
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 TORCHINDUCTOR_CACHE_DIR=/media/nvme_2tb/maked/audio/cache/inductor \
 TRITON_CACHE_DIR=/media/nvme_2tb/maked/audio/cache/triton \
 NCCL_P2P_LEVEL=SYS NCCL_SHM_DISABLE=1 NCCL_CUMEM_HOST_ENABLE=0 \
 CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 -m training.t2l.cli \
-  --config config/polski_100m_kontekst.json --data ../dane/bluetts_train_kontekst.csv \
+  --config config/polski_100m_kontynuacja.json --data ../dane/bluetts_train_kontekst.csv \
   --ae_checkpoint ../modele/kodek_48k_postnet/ae_wsm_6_9.pt --stats_path ../modele/stats.pt \
   --dp_checkpoint ../modele/dp_v3/duration_predictor_wsm.pt \
   --finetune --resume_from ../modele/t2l_opus/ema/ckpt_step_370000.pt \
-  --out ../modele/t2l_opus_kontekst_370k --max_steps 400000 --avg_every 50 \
-  --latents ../dane/latenty --inference_ref_wav ../glosy/poziomka_dluga.wav \
+  --out ../modele/t2l_opus_kontynuacja_370k --max_steps 500000 --avg_every 50 \
+  --latents ../dane/latenty_kontekst_370k --inference_ref_wav ../glosy/poziomka_dluga.wav \
   --val_data ../dane/bluetts_val.csv ../dane/bluetts_val_liczby.csv ../dane/bluetts_val_kontekst.csv \
-  --wandb mikolai --wandb_name t2l-100m-opus-kontekst-370k --compile
+  --wandb mikolai --wandb_name t2l-100m-opus-kontynuacja-370k --compile
 ```
 
 `--finetune` inicjalizuje nowy optymalizator z LR 0,00025. Po przerwaniu rozpoczętego przebiegu użyj tego samego `--out` i pomiń `--finetune`, aby przywrócić stan optymalizatora.

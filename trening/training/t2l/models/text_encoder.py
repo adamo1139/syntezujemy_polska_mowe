@@ -366,10 +366,20 @@ class TextEncoder(nn.Module):
         spte_key_mode: str = "baked",
         attn_xsa: bool = False,
         context_chars: int = 0,
+        history_frames: int = 0,
+        latent_channels: int = 144,
     ):
         super().__init__()
         if type(context_chars) is not int or context_chars < 0:
             raise ValueError("context_chars must be a nonnegative integer")
+        if type(history_frames) is not int or history_frames < 0 or (history_frames and not context_chars):
+            raise ValueError("history_frames requires a nonnegative integer and text context")
+        self.history_frames = history_frames
+        if history_frames:
+            # Frames are ordered oldest to newest, zero-padded on the left after normalization.
+            self.history_projection = nn.Sequential(nn.Conv1d(latent_channels, 32, 1, bias=False),
+                                                    nn.Flatten(1), nn.Linear(32 * history_frames, d_model, bias=False))
+            nn.init.zeros_(self.history_projection[-1].weight)
         self.context_chars = context_chars
         self.context_roles = nn.Embedding(3, d_model, padding_idx=0) if context_chars else None
         if self.context_roles is not None:
@@ -399,7 +409,7 @@ class TextEncoder(nn.Module):
         self.proj_out = nn.Identity()
 
     def forward(self, text_ids: torch.Tensor, style_ttl: torch.Tensor, text_mask: torch.Tensor | None = None,
-                context=None) -> torch.Tensor:
+                context=None, history=None) -> torch.Tensor:
         target_mask = text_mask
         if context is not None:
             window, roles, starts = context
@@ -412,6 +422,10 @@ class TextEncoder(nn.Module):
         if text_mask is not None:
             x = x * text_mask
 
+        if history is not None:
+            x = x + self.history_projection(history).unsqueeze(2)
+            if text_mask is not None:
+                x = x * text_mask
         x = self.convnext(x, mask=text_mask)
         convnext_output = x
 
