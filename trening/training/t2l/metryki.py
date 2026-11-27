@@ -107,15 +107,13 @@ class Metryki:
         if self.run is not None:
             self.run.log(dane, step=global_step)
 
-    def audio(self, log_dir: str, global_step: int, sample_rate: int):
-        """Próbki odsłuchowe z danego kroku (step_<krok>_*.wav w log_dir) jako wandb.Audio."""
-        if self.run is None:
+    def audio(self, files, global_step: int, sample_rate: int, scores: dict):
+        if self.run is None or not files:
             return
-        import glob
-        pliki = sorted(glob.glob(os.path.join(log_dir, f"step_{global_step}_*.wav")))
-        if pliki:
-            self.run.log({f"probki/{os.path.basename(p)[len(f'step_{global_step}_'):-4]}":
-                          self.wandb.Audio(p, sample_rate=sample_rate) for p in pliki}, step=global_step)
+        prefix = f"step_{global_step}_"
+        audio = {f"probki/{os.path.basename(path)[len(prefix):-4]}": self.wandb.Audio(path, sample_rate=sample_rate)
+                 for path in files}
+        self.run.log({**audio, **scores}, step=global_step)
 
     def koniec(self):
         if self.run is not None:

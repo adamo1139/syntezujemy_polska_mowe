@@ -96,3 +96,21 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 -m training.t2l.c
 ```
 
 `--finetune` inicjalizuje nowy optymalizator z LR 0,00025. Po przerwaniu rozpoczętego przebiegu użyj tego samego `--out` i pomiń `--finetune`, aby przywrócić stan optymalizatora.
+
+#### Próbki i oceny MOS przy zapisie checkpointu
+
+Trener zapisuje jeden WAV dla każdego promptu z głosem z `--inference_ref_wav`. Przy braku pliku referencyjnego używa pierwszej dostępnej referencji z partii walidacyjnej. Przy regularnym zapisie (`ttl.train.save_every`) osobny proces CPU ocenia wygenerowane WAV-y. Wyniki dla każdego pliku trafiają do `logs/step_<krok>_mos.csv`. W&B dostaje średnie `probki/dnsmos_ovrl`, `probki/utmos22`, `probki/utmosv2` oraz liczbę ocen w każdej średniej (`_n`). Brakującą ocenę trener zgłasza w logu i pozostawia puste pole w CSV.
+
+Jednorazowa instalacja z katalogu `trening/` dla wszystkich trzech metryk:
+
+```bash
+uv venv --python 3.12 .venv-mos
+uv pip install --python .venv-mos/bin/python --index-url https://download.pytorch.org/whl/cpu \
+  torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0
+uv pip install --python .venv-mos/bin/python speechmos onnxruntime soundfile 'transformers>=4.42.4,<5' \
+  'utmosv2 @ git+https://github.com/sarulab-speech/UTMOSv2.git@cc2700db57bb83ee13dc31ebe1b868c254e15d09'
+.venv-mos/bin/python -m training.t2l.sample_mos --out /tmp/mos-proba.csv ../glosy/poziomka_dluga.wav
+cat /tmp/mos-proba.csv
+```
+
+Próba pobiera potrzebne wagi przed treningiem. Trener sam wykrywa `.venv-mos`. Alternatywny interpreter można wskazać przez `T2L_MOS_PYTHON`. UTMOSv2 używa modelu fusion_stage3, fold 0, z jednym przebiegiem oceny.

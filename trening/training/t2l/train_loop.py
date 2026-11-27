@@ -47,6 +47,7 @@ from training.t2l.cfg_utils import (
 from training.t2l.rsf import rsf_loss, rsf_negative_targets, silence_latent
 from training.t2l.sampling import build_reference_only, build_reference_from_latents, sample_audio, set_audio_format
 from training.t2l.spfm import spfm_forward_mask
+from training.t2l.sample_mos import score_checkpoint
 
 # --- periodic checkpoint log phrases (Hebrew IPA + espeak for other langs) ---
 
@@ -1128,77 +1129,32 @@ def train(
                 re_infer.eval()
                 dev = str(device) if isinstance(device, torch.device) else device
 
+                prompt_files = []
+                vc_files = []
                 try:
                     if eval_phrases:   # zdania próbne z konfiguracji: surowy tekst, bez espeak
                         eval_phrase_rows = [("pl", "proba", [normalize_text(s) for s in eval_phrases])]
                     else:
                         eval_phrase_rows = build_periodic_eval_phrases(affricate_ligatures)
 
-                    # Computes style_ttl + style_dp once from the reference wav,
-                    # then reuses them across all sentences — matches ONNX inference pattern.
-                    def run_inference_for_ref(ref_wav_torch, suffix, sentences, lang, label):
-                        if ref_wav_torch is None or not sentences:
-                            return
-
-                        with torch.no_grad():
-                            ref_mel = mel_spec(ref_wav_torch)
-                            ref_z_enc = ae_encoder(ref_mel)
-                            ref_z_enc = compress_latents(ref_z_enc, factor=chunk_compress_factor)
-                            ref_z_norm = ((ref_z_enc - mean) / std) * normalizer_scale
-
-                            B_ref, _, T_ref = ref_z_norm.shape
-                            valid_z_len_ref = torch.tensor([T_ref], device=device)
-                            ref_z, ref_mask = build_reference_only(ref_z_norm, valid_z_len_ref, device, max_frames=256)
-
-                            # Extract style tokens once — reused for all sentences
-                            style_ttl = re_infer(ref_z, mask=ref_mask)      # [1, 50, 256]
-                            style_dp = None
-                            if dp_model is not None:
-                                style_dp = dp_model.ref_encoder(ref_z, mask=ref_mask)  # [1, 128]
-                                style_dp = style_dp.reshape(B_ref, 8, 16)              # [1, 8, 16]
-
-                        for i, text in enumerate(sentences):
-                            ids = text_to_indices_multilang(text, base_lang=lang)
-                            if lang_tags:
-                                ids = wrap_lang_tags(ids, lang)
-                            txt_ids = torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(device)
-                            txt_mask = torch.ones(1, 1, txt_ids.shape[1], device=device)
-
-                            wav_out = sample_audio(
-                                vf_infer, te_infer, re_infer, ae_decoder,
-                                txt_ids, txt_mask,
-                                z_ref=None, ref_enc_mask=None,
-                                mean=mean, std=std,
-                                duration_predictor=dp_model,
-                                steps=16,
-                                device=dev,
-                                debug_label=f"{label}_{suffix}",
-                                latent_dim=latent_dim,
-                                chunk_compress_factor=chunk_compress_factor,
-                                normalizer_scale=normalizer_scale,
-                                style_ttl=style_ttl,
-                                style_dp=style_dp,
-                                uncond_params=uncond_params,
-                                cfg_scale=4.0,
-                            )
-                            wav = wav_out.squeeze().cpu().numpy()
-                            sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_{suffix}.wav"), wav, ae_sample_rate)
-
+                    # One reference for all prompts. Fall back to the validation clip when no WAV was supplied.
+                    ref_z, ref_mask = None, None
                     if ref_wav_torch_v1 is not None:
-                        for _lang, _label, sents in eval_phrase_rows:
-                            run_inference_for_ref(ref_wav_torch_v1, "voice1", sents, _lang, _label)
-
-                    # Run for Validation Batch
-                    if val_batch is not None and val_wavs is not None and val_text_ids is not None and val_text_masks is not None and val_ref_wavs is not None and val_ref_lengths is not None and val_z_ref is not None and val_ref_enc_mask is not None:
                         with torch.no_grad():
-                            ref_z_val = val_z_ref[0:1] if val_z_ref is not None else None
-                            ref_mask_val = val_ref_enc_mask[0:1] if val_ref_enc_mask is not None else None
-                            val_style_ttl = re_infer(ref_z_val, mask=ref_mask_val) if ref_z_val is not None else None  # [1, 50, 256]
-                            val_style_dp = None
-                            if dp_model is not None and ref_z_val is not None:
-                                val_style_dp = dp_model.ref_encoder(ref_z_val, mask=ref_mask_val)  # [1, 128]
-                                val_style_dp = val_style_dp.reshape(1, 8, 16)
+                            encoded = compress_latents(ae_encoder(mel_spec(ref_wav_torch_v1)), factor=chunk_compress_factor)
+                            ref_z_norm = ((encoded - mean) / std) * normalizer_scale
+                            ref_z, ref_mask = build_reference_only(
+                                ref_z_norm, torch.tensor([ref_z_norm.shape[2]], device=device), device, max_frames=256)
+                        suffix = "voice1"
+                    elif val_batch is not None and val_z_ref is not None:
+                        ref_z, ref_mask = val_z_ref[:1], val_ref_enc_mask[:1]
+                        suffix = "val_sample"
 
+                    if ref_z is not None:
+                        with torch.no_grad():
+                            style_ttl = re_infer(ref_z, mask=ref_mask)
+                            style_dp = (dp_model.ref_encoder(ref_z, mask=ref_mask).reshape(1, 8, 16)
+                                        if dp_model is not None else None)
                         for lang, label, sentences in eval_phrase_rows:
                             for i, text in enumerate(sentences):
                                 ids = text_to_indices_multilang(text, base_lang=lang)
@@ -1215,17 +1171,19 @@ def train(
                                     duration_predictor=dp_model,
                                     steps=16,
                                     device=dev,
-                                    debug_label=f"{label}_val_sample",
+                                    debug_label=f"{label}_{suffix}",
                                     latent_dim=latent_dim,
                                     chunk_compress_factor=chunk_compress_factor,
-                                normalizer_scale=normalizer_scale,
-                                style_ttl=val_style_ttl,
-                                style_dp=val_style_dp,
-                                uncond_params=uncond_params,
-                                cfg_scale=4.0,
-                            )
+                                    normalizer_scale=normalizer_scale,
+                                    style_ttl=style_ttl,
+                                    style_dp=style_dp,
+                                    uncond_params=uncond_params,
+                                    cfg_scale=4.0,
+                                )
                                 wav = wav_out.squeeze().cpu().numpy()
-                                sf.write(os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_val_sample.wav"), wav, ae_sample_rate)
+                                path = os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_{suffix}.wav")
+                                sf.write(path, wav, ae_sample_rate)
+                                prompt_files.append(path)
 
                     # VC Check: val_batch[0] content → reference.wav speaker
                     # Saves source audio + converted output so content preservation can be verified.
@@ -1233,8 +1191,9 @@ def train(
                     if val_batch is not None and os.path.exists(vc_ref_path):
                         try:
                             # Save source for comparison
+                            source_path = os.path.join(log_dir, f"step_{global_step}_vc_source.wav")
                             sf.write(
-                                os.path.join(log_dir, f"step_{global_step}_vc_source.wav"),
+                                source_path,
                                 val_wavs[0].squeeze().cpu().numpy() if val_wavs is not None else None,
                                 ae_sample_rate,
                             )
@@ -1286,11 +1245,13 @@ def train(
                                 uncond_params=uncond_params,
                                 cfg_scale=4.0,
                             )
+                            output_path = os.path.join(log_dir, f"step_{global_step}_vc_output.wav")
                             sf.write(
-                                os.path.join(log_dir, f"step_{global_step}_vc_output.wav"),
+                                output_path,
                                 wav_vc.squeeze().cpu().numpy(),
                                 ae_sample_rate,
                             )
+                            vc_files.extend((source_path, output_path))
                         except Exception as _vc_e:
                             print(f"[Inference] VC check failed: {_vc_e}")
 
@@ -1302,7 +1263,8 @@ def train(
                 vf_estimator.train()
                 text_encoder.train()
                 reference_encoder.train(not freeze_reference)
-                metryki.audio(log_dir, global_step, ae_sample_rate)
+                scores = score_checkpoint(prompt_files, log_dir, global_step) if prompt_files else {}
+                metryki.audio(prompt_files + vc_files, global_step, ae_sample_rate, scores)
 
         # Flush remaining gradients if dataloader length is not divisible by accumulation_steps
         if num_batches % accumulation_steps != 0:
