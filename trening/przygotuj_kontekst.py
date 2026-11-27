@@ -10,8 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-import torch
-from torchaudio.functional import resample
+from kestrel_native import resample_audio_mono
 import moondream as md
 from tqdm import tqdm
 
@@ -51,7 +50,9 @@ def quiet_boundary(audio, sr, end, start, peak):
 def align(model, source, sentences):
     audio, sr = sf.read(source, dtype="float32", always_2d=True)
     mono = audio.mean(axis=1)
-    samples = resample(torch.from_numpy(mono), sr, 16000).numpy()
+    samples = mono if sr == 16000 else resample_audio_mono(
+        mono, sr, 16000, max_output_values=(len(mono) * 16000 + sr - 1) // sr + 64,
+    )
     result = model.transcribe(audio=np.ascontiguousarray(np.clip(samples, -1, 1)), sample_rate=16000,
                               timestamps="word")
     timed = [(token, w["start"], w["end"]) for seg in result["segments"]
@@ -109,7 +110,7 @@ def main():
             if sentences:
                 st = source.stat()
                 key = hashlib.sha256(json.dumps([str(source), sentences, st.st_size, st.st_mtime_ns,
-                                                args.model], ensure_ascii=False).encode()).hexdigest()
+                                                args.model, "photon-resample-v1"], ensure_ascii=False).encode()).hexdigest()
                 folder = cache / key[:2]
                 folder.mkdir(exist_ok=True)
                 marker = folder / (key + ".json")

@@ -6,6 +6,7 @@ teksty/
 dane/
 modele/
 trening/.venv/
+trening/.venv-parakeet/
 liczby/teksty_hf.*
 liczby/teksty_slowne.jsonl
 

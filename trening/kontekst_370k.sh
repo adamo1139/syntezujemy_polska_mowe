@@ -14,10 +14,16 @@ export CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7
 
 case "${1:-}" in
   przygotuj)
+    if [[ ! -x .venv-parakeet/bin/python ]]; then
+      uv venv --python 3.12 .venv-parakeet
+    fi
+    uv pip install --python .venv-parakeet/bin/python --index-url https://download.pytorch.org/whl/cu128 'torch==2.11.0+cu128'
+    uv pip install --python .venv-parakeet/bin/python --constraint <(echo 'torch==2.11.0+cu128') \
+      moondream==2.6.1 numpy soundfile tqdm
     for split in train val; do
       opcje=()
       if [[ "$split" == val ]]; then opcje+=(--tylko-kontekst); fi
-      uv run --no-sync --with moondream==2.6.1 python przygotuj_kontekst.py \
+      .venv-parakeet/bin/python przygotuj_kontekst.py \
         "$dane/bluetts_${split}.csv" "$dane/bluetts_${split}_kontekst.csv" "${opcje[@]}"
     done
     python policz_latenty.py --metadata "$train" "${walidacja[@]}" \
