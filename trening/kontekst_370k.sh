@@ -24,7 +24,7 @@ case "${1:-}" in
       opcje=()
       if [[ "$split" == val ]]; then opcje+=(--tylko-kontekst); fi
       .venv-parakeet/bin/python przygotuj_kontekst.py \
-        "$dane/bluetts_${split}.csv" "$dane/bluetts_${split}_kontekst.csv" "${opcje[@]}"
+        "$dane/bluetts_${split}.csv" "$dane/bluetts_${split}_kontekst.csv" --karty 1,2,3,4,5,6,7 --watki 32 --partia 256 "${opcje[@]}"
     done
     python policz_latenty.py --metadata "$train" "${walidacja[@]}" \
       --ae_checkpoint "$kodek" --wyjscie "$latenty" --device cuda:0,cuda:1,cuda:2,cuda:3,cuda:4,cuda:5,cuda:6
