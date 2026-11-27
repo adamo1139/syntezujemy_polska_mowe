@@ -57,6 +57,7 @@ class Walidacja:
             m.eval()
         np_stan = np.random.get_state()
         sumy = torch.zeros(2 * len(PUNKTY_T), dtype=torch.float64, device=self.device)
+        poczatek = torch.zeros(3, dtype=torch.float64, device=self.device)
         loader = DataLoader(self.ds, batch_sampler=self.partie, num_workers=0, collate_fn=collate_text2latent)
         try:
             with torch.no_grad(), torch.random.fork_rng(devices=[self.device] if self.device.type == "cuda" else []):
@@ -81,23 +82,44 @@ class Walidacja:
                     tb = t.view(-1, 1, 1)
                     x_t = ((1 - (1 - sigma_min) * tb) * x_0 + tb * z1e) * lm
                     v_cel = z1e - (1 - sigma_min) * x_0
-                    with amp_ctx():
-                        v = vf(noisy_latent=x_t, text_emb=h.repeat_interleave(K, 0), style_ttl=styl.repeat_interleave(K, 0),
-                               latent_mask=lm, text_mask=text_masks.repeat_interleave(K, 0), current_step=t,
-                               style_keys=u_key_tile(B * K))
+                    def predykcja(h_text):
+                        with amp_ctx():
+                            return vf(noisy_latent=x_t, text_emb=h_text.repeat_interleave(K, 0),
+                                      style_ttl=styl.repeat_interleave(K, 0), latent_mask=lm,
+                                      text_mask=text_masks.repeat_interleave(K, 0), current_step=t,
+                                      style_keys=u_key_tile(B * K))
+
+                    v = predykcja(h)
                     maska = (lm * target_mask.repeat_interleave(K, 0)).expand(-1, C, -1)
                     blad = (F.l1_loss(v.float(), v_cel, reduction="none") * maska).sum(dim=(1, 2)).view(B, K).sum(0)
                     sumy[:K] += blad.double()
                     sumy[K:] += maska.sum(dim=(1, 2)).view(B, K).sum(0).double()
+
+                    # Ten sam cel, szum, głos i tekst. Zmieniamy tylko historię akustyczną.
+                    if history is not None and (partia[10][1] > 0).any():
+                        para = (partia[10][1] > 0).to(self.device).repeat_interleave(K)
+                        granica = maska[:, :, :16] * para[:, None, None]
+                        cel = v_cel[:, :, :16]
+                        poczatek[0] += ((v[:, :, :16].float() - cel).abs() * granica).sum(dtype=torch.float64)
+                        with amp_ctx():
+                            h_bez = te(text_ids, styl, text_mask=text_masks, context=context, history=None)
+                        v_bez = predykcja(h_bez)
+                        poczatek[1] += ((v_bez[:, :, :16].float() - cel).abs() * granica).sum(dtype=torch.float64)
+                        poczatek[2] += granica.sum(dtype=torch.float64)
         finally:
             np.random.set_state(np_stan)
             for m, tr in zip(modele, tryby):
                 m.train(tr)
         if dist.is_initialized():
             dist.all_reduce(sumy)
+            dist.all_reduce(poczatek)
         K = len(PUNKTY_T)
         per_t = (sumy[:K] / sumy[K:].clamp(min=1)).tolist()
         wynik = {f"{self.prefiks}/loss": float(sumy[:K].sum() / sumy[K:].sum().clamp(min=1))}
         for tt, w in zip(PUNKTY_T, per_t):
             wynik[f"{self.prefiks}/loss_t{tt:.1f}"] = w
+        if poczatek[2] > 0:
+            z, bez = (poczatek[:2] / poczatek[2]).tolist()
+            wynik.update({f"{self.prefiks}/onset_loss": z, f"{self.prefiks}/onset_loss_no_history": bez,
+                          f"{self.prefiks}/onset_history_gain": bez - z})
         return wynik

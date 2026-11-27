@@ -99,3 +99,7 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 -m training.t2l.c
 #### Próbki przy zapisie checkpointu
 
 Co `ttl.train.save_every` kroków trener zapisuje jeden WAV na prompt z głosem z `--inference_ref_wav`. Przy braku tego pliku używa pierwszej dostępnej referencji z partii walidacyjnej. Próbki trafiają do `logs/` i, przy włączonym W&B, do `probki/`.
+
+Przy treningu z historią audio walidacja mierzy też błąd predykcji na pierwszych 16 ramkach po cięciu (1,024 s przy 48 kHz). Uwzględnia tylko fragmenty z poprzednikiem i pomija ramki zamaskowane przez wzorzec głosu. W W&B i CSV `onset_loss` oznacza wynik z rzeczywistą końcówką nagrania, a `onset_loss_no_history` wynik tego samego modelu przy wyłączonej historii audio. Oba pomiary mają ten sam tekst, wzorzec głosu, szum i punkty czasu. Dodatni `onset_history_gain` oznacza, że historia obniżyła błąd na początku kontynuacji.
+
+Próbka `probki/kontynuacja` w W&B i `logs/step_<krok>_kontynuacja.wav` zawiera trzy fragmenty jednego akapitu. Każdy kolejny dostaje latenty wygenerowanego poprzednika. Tekst i ziarno są stałe między checkpointami, a fragmenty są sklejane bez dokładania ciszy.

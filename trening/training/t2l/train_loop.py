@@ -1051,7 +1051,7 @@ def train(
                     if rank == 0:
                         _k = f"{_prefiks}/loss"
                         print(f"\n[walidacja] krok {global_step}: {_k} {_w[_k]:.4f} | "
-                              + " ".join(f"t{k[-3:]} {v:.4f}" for k, v in _w.items() if k != _k)
+                              + " ".join(f"{k.split('/')[-1]} {v:.5f}" for k, v in _w.items() if k != _k)
                               + f" | {time.time() - _t0:.0f} s")
                         metryki.loguj(_w, global_step)
                         _plik = os.path.join(checkpoint_dir, "walidacja.csv" if _prefiks == "val" else f"walidacja_{_prefiks[4:]}.csv")
@@ -1175,6 +1175,21 @@ def train(
                             style_ttl = re_infer(ref_z, mask=ref_mask)
                             style_dp = (dp_model.ref_encoder(ref_z, mask=ref_mask).reshape(1, 8, 16)
                                         if dp_model is not None else None)
+                        generuj = functools.partial(sample_audio,
+                            vf_infer, te_infer, re_infer, ae_decoder,
+                            z_ref=None, ref_enc_mask=None,
+                            mean=mean, std=std,
+                            duration_predictor=dp_model,
+                            steps=16,
+                            device=dev,
+                            latent_dim=latent_dim,
+                            chunk_compress_factor=chunk_compress_factor,
+                            normalizer_scale=normalizer_scale,
+                            style_ttl=style_ttl,
+                            style_dp=style_dp,
+                            uncond_params=uncond_params,
+                            cfg_scale=4.0,
+                        )
                         for lang, label, sentences in eval_phrase_rows:
                             for i, text in enumerate(sentences):
                                 ids = text_to_indices_multilang(text, base_lang=lang)
@@ -1183,27 +1198,34 @@ def train(
                                 txt_ids = torch.tensor(ids, dtype=torch.long).unsqueeze(0).to(device)
                                 txt_mask = torch.ones(1, 1, txt_ids.shape[1], device=device)
 
-                                wav_out = sample_audio(
-                                    vf_infer, te_infer, re_infer, ae_decoder,
-                                    txt_ids, txt_mask,
-                                    z_ref=None, ref_enc_mask=None,
-                                    mean=mean, std=std,
-                                    duration_predictor=dp_model,
-                                    steps=16,
-                                    device=dev,
-                                    debug_label=f"{label}_{suffix}",
-                                    latent_dim=latent_dim,
-                                    chunk_compress_factor=chunk_compress_factor,
-                                    normalizer_scale=normalizer_scale,
-                                    style_ttl=style_ttl,
-                                    style_dp=style_dp,
-                                    uncond_params=uncond_params,
-                                    cfg_scale=4.0,
-                                )
+                                wav_out = generuj(txt_ids, txt_mask, debug_label=f"{label}_{suffix}")
                                 wav = wav_out.squeeze().cpu().numpy()
                                 path = os.path.join(log_dir, f"step_{global_step}_{label}_{i+1}_{suffix}.wav")
                                 sf.write(path, wav, ae_sample_rate)
                                 prompt_files.append(path)
+
+                        if history_frames:
+                            from training.t2l.models.text_encoder import pack_context
+                            akapit = ("Gdy wyszliśmy z domu, ulica była jeszcze cicha.",
+                                      "Dopiero za rogiem usłyszeliśmy kroki. Kto mógł tam być?",
+                                      "Przystanęliśmy na chwilę i wtedy zza bramy wybiegł nasz pies.")
+                            tokens = [text_to_indices_multilang(normalize_text(t), base_lang="pl") for t in akapit]
+                            kawalki, historia = [], None
+                            with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+                                torch.default_generator.manual_seed(400000)
+                                if device.type == "cuda":
+                                    torch.cuda.manual_seed(400000)
+                                for i, ids in enumerate(tokens):
+                                    target = torch.tensor(wrap_lang_tags(ids, "pl") if lang_tags else ids, device=device)
+                                    left = tokens[i - 1][-context_chars:] if i else []
+                                    right = tokens[i + 1][:context_chars] if i + 1 < len(tokens) else []
+                                    ctx = pack_context([(target.new_tensor(left), target, target.new_tensor(right))])
+                                    wav, historia = generuj(target[None], torch.ones(1, 1, len(target), device=device),
+                                                           context=ctx, history=historia, return_history=True)
+                                    kawalki.append(wav.reshape(-1).cpu())
+                            path = os.path.join(log_dir, f"step_{global_step}_kontynuacja.wav")
+                            sf.write(path, torch.cat(kawalki).numpy(), ae_sample_rate)
+                            prompt_files.append(path)
 
                     # VC Check: val_batch[0] content → reference.wav speaker
                     # Saves source audio + converted output so content preservation can be verified.
